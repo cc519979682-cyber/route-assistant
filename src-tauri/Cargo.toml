@@ -1,0 +1,45 @@
+[package]
+name = "route-assistant"
+version = "0.1.0"
+description = "A safe routing-rule assistant for OpenWrt proxy plugins"
+authors = ["Route Assistant Contributors"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/route-assistant/route-assistant"
+
+[lib]
+name = "route_assistant_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6"
+hex = "0.4"
+idna = "1"
+keyring = { version = "3", features = ["windows-native"] }
+regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+russh = { version = "0.62.2", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"

@@ -1,0 +1,31 @@
+name: 错误报告
+description: 报告已脱敏的问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿提交密码、私钥、订阅地址、节点信息或未经脱敏的配置。
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: 代理插件
+      options: [OpenClash, Nikki, 未识别]
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: 软件、插件和核心版本
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 已确认脱敏的诊断摘要
