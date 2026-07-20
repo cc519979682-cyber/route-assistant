@@ -5,7 +5,7 @@ description = "A safe routing-rule assistant for OpenWrt proxy plugins"
 authors = ["Route Assistant Contributors"]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/route-assistant/route-assistant"
+repository = "https://github.com/cc519979682-cyber/route-assistant"
 
 [lib]
 name = "route_assistant_lib"
