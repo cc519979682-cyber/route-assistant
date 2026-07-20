@@ -126,6 +126,56 @@ pub struct RuleSpec {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CustomRuleOwner {
+    Assistant,
+    Existing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CustomRuleParseState {
+    Structured,
+    Raw,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRuleRecord {
+    pub id: String,
+    pub source_location: String,
+    pub position: usize,
+    pub owner: CustomRuleOwner,
+    pub enabled: bool,
+    pub rule_type: String,
+    pub matcher: Option<String>,
+    pub target: Option<String>,
+    pub note: Option<String>,
+    pub raw_preview: String,
+    pub parse_state: CustomRuleParseState,
+    pub warning: Option<String>,
+    pub copy_draft: Option<RuleDraft>,
+    pub assistant_rule: Option<RuleSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRuleNotice {
+    pub code: String,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesSnapshot {
+    pub plugin: PluginKind,
+    pub rules: Vec<CustomRuleRecord>,
+    pub notices: Vec<CustomRuleNotice>,
+}
+
 impl RuleSpec {
     pub fn mihomo_line(&self) -> String {
         let kind = match self.scope {
@@ -213,4 +263,3 @@ pub struct CommandOutput {
     pub stderr: String,
     pub exit_status: u32,
 }
-

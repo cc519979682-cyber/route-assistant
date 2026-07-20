@@ -72,6 +72,38 @@ export interface RuleDraft {
   note?: string;
 }
 
+export type CustomRuleOwner = "assistant" | "existing";
+export type CustomRuleParseState = "structured" | "raw" | "invalid";
+
+export interface CustomRuleRecord {
+  id: string;
+  sourceLocation: string;
+  position: number;
+  owner: CustomRuleOwner;
+  enabled: boolean;
+  ruleType: string;
+  matcher?: string;
+  target?: string;
+  note?: string;
+  rawPreview: string;
+  parseState: CustomRuleParseState;
+  warning?: string;
+  copyDraft?: RuleDraft;
+  assistantRule?: RuleSpec;
+}
+
+export interface CustomRuleNotice {
+  code: string;
+  level: "info" | "warning" | "error";
+  message: string;
+}
+
+export interface CustomRulesSnapshot {
+  plugin: PluginKind;
+  rules: CustomRuleRecord[];
+  notices: CustomRuleNotice[];
+}
+
 export interface PolicyTarget {
   name: string;
   kind: "builtIn" | "group";
@@ -129,4 +161,3 @@ export interface OperationHistoryItem {
   success: boolean;
   createdAt: string;
 }
-

@@ -343,4 +343,3 @@ mod tests {
         assert!(store.list_profiles().unwrap().is_empty());
     }
 }
-

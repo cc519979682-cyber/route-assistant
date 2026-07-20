@@ -76,4 +76,3 @@ mod tests {
         assert!(normalize_domain("*.example.com", &MatchScope::Suffix).is_err());
     }
 }
-

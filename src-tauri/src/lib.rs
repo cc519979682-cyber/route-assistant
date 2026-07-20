@@ -14,11 +14,10 @@ use storage::Store;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let store = Store::open_default().unwrap_or_else(|error| {
-        panic!("failed to initialize safe local storage: {error}")
-    });
+    let store = Store::open_default()
+        .unwrap_or_else(|error| panic!("failed to initialize safe local storage: {error}"));
     let _log_guard = logging::init(store.data_dir());
-    logging::safe_info("application_started", "route-assistant v0.1.0");
+    logging::safe_info("application_started", "route-assistant v0.2.0");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -28,8 +27,10 @@ pub fn run() {
             commands::discover_router,
             commands::select_plugin,
             commands::list_rules,
+            commands::list_custom_rules,
             commands::list_policy_targets,
             commands::plan_rule_change,
+            commands::plan_rule_update,
             commands::plan_rule_removal,
             commands::apply_rule_change,
             commands::verify_rule,

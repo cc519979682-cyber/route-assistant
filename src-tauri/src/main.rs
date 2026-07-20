@@ -3,4 +3,3 @@
 fn main() {
     route_assistant_lib::run();
 }
-

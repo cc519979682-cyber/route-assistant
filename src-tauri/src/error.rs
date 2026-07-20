@@ -40,4 +40,3 @@ impl From<anyhow::Error> for AppError {
         Self::Other(value.to_string())
     }
 }
-

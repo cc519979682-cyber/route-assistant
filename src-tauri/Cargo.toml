@@ -1,6 +1,6 @@
 [package]
 name = "route-assistant"
-version = "0.1.0"
+version = "0.2.0"
 description = "A safe routing-rule assistant for OpenWrt proxy plugins"
 authors = ["Route Assistant Contributors"]
 edition = "2024"

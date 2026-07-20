@@ -4,23 +4,27 @@ import {
   discoverRouter,
   exportDiagnostics,
   listHistory,
+  listCustomRules,
   listPolicyTargets,
   listProfiles,
-  listRules,
   planRuleChange,
   planRuleRemoval,
+  planRuleUpdate,
   selectPlugin,
 } from "./api";
 import { createTranslator } from "./i18n";
+import { filterCustomRules } from "./customRules";
 import type {
   ChangePlan,
+  CustomRuleOwner,
+  CustomRuleRecord,
+  CustomRulesSnapshot,
   Locale,
   OperationHistoryItem,
   PolicyTarget,
   RouterProfile,
   RouterProfileInput,
   RouterSnapshot,
-  RuleAction,
   RuleDraft,
   RuleSpec,
   VerificationReport,
@@ -45,12 +49,6 @@ const initialDraft: RuleDraft = {
   note: "",
 };
 
-function actionLabel(action: RuleAction) {
-  if (action.type === "direct") return "直连";
-  if (action.type === "reject") return "拒绝";
-  return action.name;
-}
-
 function App() {
   const [locale, setLocale] = useState<Locale>("zh-CN");
   const t = useMemo(() => createTranslator(locale), [locale]);
@@ -59,7 +57,7 @@ function App() {
   const [profiles, setProfiles] = useState<RouterProfile[]>([]);
   const [connection, setConnection] = useState<RouterProfileInput>(initialConnection);
   const [snapshot, setSnapshot] = useState<RouterSnapshot>();
-  const [rules, setRules] = useState<RuleSpec[]>([]);
+  const [customRules, setCustomRules] = useState<CustomRulesSnapshot>();
   const [targets, setTargets] = useState<PolicyTarget[]>([]);
   const [history, setHistory] = useState<OperationHistoryItem[]>([]);
   const [draft, setDraft] = useState<RuleDraft>(initialDraft);
@@ -68,6 +66,14 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showRuleForm, setShowRuleForm] = useState(false);
+  const [ruleOwnerFilter, setRuleOwnerFilter] = useState<"all" | CustomRuleOwner>("all");
+  const [ruleSearch, setRuleSearch] = useState("");
+  const [modalMode, setModalMode] = useState<"create" | "copy" | "edit" | "delete">("create");
+  const [editingRuleId, setEditingRuleId] = useState<string>();
+
+  const visibleRules = useMemo(() => {
+    return filterCustomRules(customRules?.rules ?? [], ruleOwnerFilter, ruleSearch);
+  }, [customRules, ruleOwnerFilter, ruleSearch]);
 
   useEffect(() => {
     listProfiles().then(setProfiles).catch(() => setProfiles([]));
@@ -75,11 +81,11 @@ function App() {
 
   async function refreshRouterData(profileId: string) {
     const [nextRules, nextTargets, nextHistory] = await Promise.all([
-      listRules(profileId),
-      listPolicyTargets(profileId),
+      listCustomRules(profileId),
+      listPolicyTargets(profileId).catch(() => []),
       listHistory(profileId),
     ]);
-    setRules(nextRules);
+    setCustomRules(nextRules);
     setTargets(nextTargets);
     setHistory(nextHistory);
   }
@@ -91,7 +97,13 @@ function App() {
       const nextSnapshot = await discoverRouter({ ...connection, trustHostKey });
       setSnapshot(nextSnapshot);
       if (nextSnapshot.needsHostKeyTrust && !trustHostKey) return;
-      await refreshRouterData(nextSnapshot.profile.id);
+      if (nextSnapshot.selectedPlugin) {
+        await refreshRouterData(nextSnapshot.profile.id);
+      } else {
+        setCustomRules(undefined);
+        setTargets([]);
+        setHistory(await listHistory(nextSnapshot.profile.id));
+      }
       setScreen("dashboard");
     } catch (cause) {
       setError(String(cause));
@@ -106,7 +118,9 @@ function App() {
     setError(undefined);
     setReport(undefined);
     try {
-      setPlan(await planRuleChange(snapshot.profile.id, draft));
+      setPlan(editingRuleId
+        ? await planRuleUpdate(snapshot.profile.id, editingRuleId, draft)
+        : await planRuleChange(snapshot.profile.id, draft));
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -129,6 +143,8 @@ function App() {
         setShowRuleForm(false);
         setPlan(undefined);
         setDraft(initialDraft);
+        setEditingRuleId(undefined);
+        setModalMode("create");
       }
     } catch (cause) {
       setError(String(cause));
@@ -144,12 +160,48 @@ function App() {
     setReport(undefined);
     try {
       setPlan(await planRuleRemoval(snapshot.profile.id, rule));
+      setModalMode("delete");
+      setEditingRuleId(undefined);
       setShowRuleForm(true);
     } catch (cause) {
       setError(String(cause));
     } finally {
       setBusy(false);
     }
+  }
+
+  function openCreate() {
+    setDraft(initialDraft);
+    setPlan(undefined);
+    setReport(undefined);
+    setEditingRuleId(undefined);
+    setModalMode("create");
+    setShowRuleForm(true);
+  }
+
+  function prepareCopy(rule: CustomRuleRecord) {
+    if (!rule.copyDraft) return;
+    setDraft({ ...rule.copyDraft, note: rule.copyDraft.note ?? "" });
+    setPlan(undefined);
+    setReport(undefined);
+    setEditingRuleId(undefined);
+    setModalMode("copy");
+    setShowRuleForm(true);
+  }
+
+  function prepareEdit(rule: CustomRuleRecord) {
+    if (!rule.assistantRule) return;
+    setDraft({
+      domain: rule.assistantRule.normalizedDomain,
+      scope: rule.assistantRule.scope,
+      action: rule.assistantRule.action,
+      note: rule.assistantRule.note ?? "",
+    });
+    setPlan(undefined);
+    setReport(undefined);
+    setEditingRuleId(rule.assistantRule.id);
+    setModalMode("edit");
+    setShowRuleForm(true);
   }
 
   if (screen === "connect") {
@@ -167,7 +219,7 @@ function App() {
         </header>
 
         <section className="connect-card">
-          <div className="eyebrow">ROUTE ASSISTANT · 0.1</div>
+          <div className="eyebrow">ROUTE ASSISTANT · 0.2</div>
           <h1>{t("connectTitle")}</h1>
           <p className="lead">只需提供 SSH 登录信息，软件会在不暴露控制端口的情况下识别代理插件。</p>
 
@@ -311,7 +363,7 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="brand-mark">路</div>
-          <div><strong>{t("appName")}</strong><span>v0.1.0</span></div>
+          <div><strong>{t("appName")}</strong><span>v0.2.0</span></div>
         </div>
         <nav>
           {(["overview", "rules", "diagnostics", "history"] as Tab[]).map((item) => (
@@ -350,7 +402,7 @@ function App() {
                 <button
                   key={plugin.kind}
                   className="secondary"
-                  disabled={busy || plugin.kind === "unsupported" || plugin.readOnly}
+                  disabled={busy || plugin.kind === "unsupported"}
                   onClick={() => choosePlugin(plugin.kind as "openClash" | "nikki")}
                 >
                   {plugin.displayName}
@@ -373,7 +425,7 @@ function App() {
               </span>
             </article>
             <article className="metric-card"><span>插件版本</span><strong>{selectedPlugin?.version ?? "未知"}</strong></article>
-            <article className="metric-card"><span>助手规则</span><strong>{rules.length}</strong><small>仅统计本助手管理</small></article>
+            <article className="metric-card"><span>{t("customRuleTotal")}</span><strong>{customRules?.rules.length ?? 0}</strong><small>{t("assistantRules")} {customRules?.rules.filter((rule) => rule.owner === "assistant").length ?? 0} · {t("existingRules")} {customRules?.rules.filter((rule) => rule.owner === "existing").length ?? 0}</small></article>
             <article className="metric-card"><span>安全能力</span><strong>{selectedPlugin?.capabilities.includes("rollback") ? "自动回滚" : "只读"}</strong><small>变更看门狗 120 秒</small></article>
             <article className="status-card full-card">
               <div className="section-heading"><div><span className="card-label">连接检查</span><h3>安全边界</h3></div></div>
@@ -391,21 +443,47 @@ function App() {
           <section>
             <div className="section-heading">
               <div><p>{t("managedOnly")}</p></div>
-              <button className="primary" disabled={selectedPlugin?.readOnly} onClick={() => { setShowRuleForm(true); setPlan(undefined); setReport(undefined); }}>
+              <button className="primary" disabled={selectedPlugin?.readOnly} onClick={openCreate}>
                 + {t("addRule")}
               </button>
             </div>
-            {rules.length === 0 ? (
-              <div className="empty-state"><div className="empty-icon">↗</div><h3>{t("noRules")}</h3><p>添加第一条域名规则前，软件会先生成中文预览。</p></div>
+            <div className="rule-summary">
+              <article><span>{t("customRuleTotal")}</span><strong>{customRules?.rules.length ?? 0}</strong></article>
+              <article><span>{t("assistantRules")}</span><strong>{customRules?.rules.filter((rule) => rule.owner === "assistant").length ?? 0}</strong></article>
+              <article><span>{t("existingRules")}</span><strong>{customRules?.rules.filter((rule) => rule.owner === "existing").length ?? 0}</strong></article>
+            </div>
+            {customRules?.notices.map((notice) => (
+              <div key={notice.code} className={`alert ${notice.level === "error" ? "error" : "info"}`}>{notice.message}</div>
+            ))}
+            <div className="rule-toolbar">
+              <div className="segmented rule-filters">
+                {(["all", "assistant", "existing"] as const).map((owner) => (
+                  <button key={owner} type="button" className={ruleOwnerFilter === owner ? "active" : ""} onClick={() => setRuleOwnerFilter(owner)}>
+                    {owner === "all" ? t("allRules") : owner === "assistant" ? t("assistantRules") : t("existingRules")}
+                  </button>
+                ))}
+              </div>
+              <label className="rule-search">
+                <span>{t("searchRules")}</span>
+                <input value={ruleSearch} placeholder={t("searchPlaceholder")} onChange={(event) => setRuleSearch(event.target.value)} />
+              </label>
+            </div>
+            {visibleRules.length === 0 ? (
+              <div className="empty-state"><div className="empty-icon">↗</div><h3>{customRules?.rules.length ? t("emptySearch") : t("noRules")}</h3><p>{customRules?.rules.length ? "" : t("emptySearch")} {t("addFirstRule")}</p></div>
             ) : (
               <div className="rule-list">
-                {rules.map((rule) => (
+                {visibleRules.map((rule) => (
                   <article key={rule.id} className="rule-row">
-                    <div className="rule-type">{rule.scope === "exact" ? "精确" : "整站"}</div>
-                    <div><strong>{rule.normalizedDomain}</strong><span>{rule.note || "由软路由分流助手管理"}</span></div>
+                    <div className="rule-type">{rule.ruleType}</div>
+                    <div className="rule-main"><strong>{rule.matcher || rule.rawPreview}</strong><span>{rule.note || rule.rawPreview}</span>{rule.warning && <small>{rule.warning}</small>}<code>{t("source")}：{rule.sourceLocation}</code></div>
                     <div className="route-arrow">→</div>
-                    <span className={`pill ${rule.action.type}`}>{actionLabel(rule.action)}</span>
-                    <button className="delete-rule" disabled={busy} onClick={() => prepareDelete(rule)}>删除</button>
+                    <div className="rule-badges"><span className={`pill ${rule.enabled ? "direct" : "warning"}`}>{rule.enabled ? t("enabled") : t("disabled")}</span><span className="pill">{rule.owner === "assistant" ? t("assistantRules") : t("existingReadOnly")}</span><span className="pill policyGroup">{rule.target ?? "—"}</span></div>
+                    <div className="rule-actions">
+                      {rule.owner === "assistant" && rule.assistantRule ? <>
+                        <button className="secondary compact" disabled={busy} onClick={() => prepareEdit(rule)}>{t("editRule")}</button>
+                        <button className="delete-rule" disabled={busy} onClick={() => prepareDelete(rule.assistantRule!)}>{t("deleteRule")}</button>
+                      </> : <button className="secondary compact" disabled={busy || rule.owner !== "existing" || !rule.copyDraft} title={rule.owner === "existing" && rule.copyDraft ? t("copyAsAssistant") : t("copyUnsupported")} onClick={() => prepareCopy(rule)}>{t("copyAsAssistant")}</button>}
+                    </div>
                   </article>
                 ))}
               </div>
@@ -437,8 +515,8 @@ function App() {
       {showRuleForm && (
         <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setShowRuleForm(false)}>
           <section className="modal">
-            <header><div><span className="eyebrow">安全变更</span><h2>{plan?.operation === "delete" ? "删除助手规则" : t("addRule")}</h2></div><button className="close" onClick={() => setShowRuleForm(false)}>×</button></header>
-            {plan?.operation !== "delete" && <>
+            <header><div><span className="eyebrow">安全变更</span><h2>{modalMode === "delete" ? "删除助手规则" : modalMode === "edit" ? t("editRuleTitle") : modalMode === "copy" ? t("copyRuleTitle") : t("addRule")}</h2></div><button className="close" onClick={() => setShowRuleForm(false)}>×</button></header>
+            {modalMode !== "delete" && <>
               <label>{t("domain")}<input autoFocus placeholder="例如：www.baidu.com" value={draft.domain} onChange={(e) => { setDraft({ ...draft, domain: e.target.value }); setPlan(undefined); }} /></label>
               <label>{t("scope")}<select value={draft.scope} onChange={(e) => { setDraft({ ...draft, scope: e.target.value as RuleDraft["scope"] }); setPlan(undefined); }}><option value="exact">{t("exactDomain")}</option><option value="suffix">{t("suffixDomain")}</option></select></label>
               <label>{t("destination")}<select value={draft.action.type === "policyGroup" ? `group:${draft.action.name}` : draft.action.type} onChange={(e) => { const value = e.target.value; setDraft({ ...draft, action: value === "direct" ? { type: "direct" } : value === "reject" ? { type: "reject" } : { type: "policyGroup", name: value.slice(6) } }); setPlan(undefined); }}><option value="direct">{t("direct")}</option><option value="reject">{t("reject")}</option>{targets.filter((item) => item.kind === "group").map((target) => <option key={target.name} value={`group:${target.name}`}>{target.name}</option>)}</select></label>
