@@ -1,6 +1,5 @@
 use crate::error::{AppError, AppResult};
 use crate::models::{AuthKind, CommandOutput, RouterProfileInput};
-use base64::Engine;
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
 use russh::{ChannelMsg, Disconnect};
@@ -15,7 +14,10 @@ struct SshHandler {
 impl client::Handler for SshHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
         let value = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         if let Ok(mut fingerprint) = self.fingerprint.lock() {
             *fingerprint = Some(value);
@@ -50,7 +52,11 @@ impl SshSession {
         .map_err(|error| AppError::Ssh(error.to_string()))?;
 
         let _ = handle
-            .disconnect(Disconnect::ByApplication, "host key probe complete", "zh-CN")
+            .disconnect(
+                Disconnect::ByApplication,
+                "host key probe complete",
+                "zh-CN",
+            )
             .await;
         captured
             .lock()
@@ -59,7 +65,10 @@ impl SshSession {
             .ok_or_else(|| AppError::Ssh("未能读取 SSH 主机指纹".into()))
     }
 
-    pub async fn connect(input: &RouterProfileInput, expected_fingerprint: &str) -> AppResult<Self> {
+    pub async fn connect(
+        input: &RouterProfileInput,
+        expected_fingerprint: &str,
+    ) -> AppResult<Self> {
         validate_connection_input(input)?;
         let captured = Arc::new(Mutex::new(None));
         let handler = SshHandler {
@@ -184,21 +193,36 @@ impl SshSession {
     }
 
     pub async fn write_file(&self, path: &str, content: &[u8], mode: u32) -> AppResult<()> {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        // OpenClash routers often ship Ruby but no coreutils `base64`.
+        // Transfer file contents as hex and decode with Ruby.
+        let encoded = hex::encode(content);
         let temporary = format!("{path}.route-assistant.tmp");
         let command = format!(
-            "umask 077; printf %s {} | base64 -d > {}; chmod {:o} {}; mv -f {} {}",
-            shell_quote(&encoded),
-            shell_quote(&temporary),
-            mode,
-            shell_quote(&temporary),
-            shell_quote(&temporary),
-            shell_quote(path),
+            concat!(
+                "umask 077; set -e; ",
+                "tmp={tmp}; ",
+                "printf %s {payload} | ruby -e 'print STDIN.read.strip.scan(/../).map{{|h| h.to_i(16).chr}}.join' > \"$tmp\"; ",
+                "actual=$(wc -c < \"$tmp\" | tr -d ' \n'); ",
+                "test \"$actual\" = \"{len}\"; ",
+                "chmod {mode:o} \"$tmp\"; ",
+                "mv -f \"$tmp\" {path}; ",
+                "test -f {path}"
+            ),
+            tmp = shell_quote(&temporary),
+            payload = shell_quote(&encoded),
+            len = content.len(),
+            mode = mode,
+            path = shell_quote(path),
         );
         self.run_checked(&command).await.map(|_| ())
     }
 
-    pub async fn api_get(&self, port: u16, secret: Option<&str>, path: &str) -> AppResult<serde_json::Value> {
+    pub async fn api_get(
+        &self,
+        port: u16,
+        secret: Option<&str>,
+        path: &str,
+    ) -> AppResult<serde_json::Value> {
         if !path.starts_with('/') || path.contains(' ') {
             return Err(AppError::Validation("Mihomo API 路径无效".into()));
         }
@@ -212,12 +236,12 @@ impl SshSession {
                 .await
                 .map_err(|error| AppError::Ssh(format!("无法建立 Mihomo SSH 隧道：{error}")))?;
             let authorization = secret
-                .filter(|value| !value.is_empty())
-                .map(|value| format!("Authorization: Bearer {value}\r\n"))
-                .unwrap_or_default();
-            let request = format!(
-                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\n{authorization}Connection: close\r\n\r\n"
-            );
+                            .filter(|value| !value.is_empty())
+                            .map(|value| format!("Authorization: Bearer {value}\r\n"))
+                            .unwrap_or_default();
+                        let request = format!(
+                            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\n{authorization}Connection: close\r\n\r\n"
+                        );
             channel
                 .data(request.as_bytes())
                 .await
@@ -259,14 +283,20 @@ fn parse_http_response(response: &[u8]) -> AppResult<Vec<u8>> {
     let headers = std::str::from_utf8(&response[..header_end])
         .map_err(|_| AppError::Ssh("Mihomo API HTTP 头无效".into()))?;
     let status = headers.lines().next().unwrap_or_default();
-    if !status.split_whitespace().nth(1).is_some_and(|code| code == "200") {
+    if !status
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|code| code == "200")
+    {
         return Err(AppError::Ssh(format!("Mihomo API 请求失败：{status}")));
     }
     let body = &response[(header_end + 4)..];
     let chunked = headers.lines().skip(1).any(|line| {
         line.split_once(':').is_some_and(|(name, value)| {
             name.eq_ignore_ascii_case("transfer-encoding")
-                && value.split(',').any(|item| item.trim().eq_ignore_ascii_case("chunked"))
+                && value
+                    .split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case("chunked"))
         })
     });
     if !chunked {
@@ -284,8 +314,9 @@ fn decode_chunked_body(mut input: &[u8]) -> AppResult<Vec<u8>> {
             .ok_or_else(|| AppError::Ssh("Mihomo API 分块响应无效".into()))?;
         let size_text = std::str::from_utf8(&input[..line_end])
             .map_err(|_| AppError::Ssh("Mihomo API 分块长度无效".into()))?;
-        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
-            .map_err(|_| AppError::Ssh("Mihomo API 分块长度无效".into()))?;
+        let size =
+            usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
+                .map_err(|_| AppError::Ssh("Mihomo API 分块长度无效".into()))?;
         input = &input[(line_end + 2)..];
         if size == 0 {
             return Ok(output);

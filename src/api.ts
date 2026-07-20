@@ -3,17 +3,22 @@ import type {
   ChangePlan,
   CustomRuleRecord,
   CustomRulesSnapshot,
+  DnsChainSnapshot,
+  DnsProtectionPlan,
+  DnsProtectionReport,
+  DnsProtectionSnapshot,
   OperationHistoryItem,
   PolicyTarget,
   RouterProfile,
   RouterProfileInput,
+  RouterPluginState,
   RouterSnapshot,
   RuleDraft,
   RuleSpec,
   VerificationReport,
 } from "./types";
 
-const isTauri = () => "__TAURI_INTERNALS__" in window;
+const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const demoProfile: RouterProfile = {
   id: "demo-router",
@@ -56,6 +61,69 @@ const demoExistingRules: CustomRuleRecord[] = [
   },
 ];
 const demoPlans = new Map<string, ChangePlan>();
+const demoDnsPlans = new Map<string, DnsProtectionPlan>();
+let demoDnsProtected = false;
+
+const demoPlugins: RouterPluginState["plugins"] = [
+  {
+    kind: "openClash",
+    displayName: "OpenClash",
+    version: "0.47.028-beta",
+    serviceState: "running",
+    coreVersion: "Mihomo demo",
+    capabilities: ["domainRules", "policyGroups", "runtimeVerification", "rollback"],
+    supportLevel: "managed",
+    canSelect: true,
+    canReadCustomRules: true,
+    readOnly: false,
+  },
+  {
+    kind: "nikki",
+    displayName: "Nikki",
+    version: "1.23.0",
+    serviceState: "stopped",
+    capabilities: ["readOnlyDiagnostics"],
+    supportLevel: "managed",
+    canSelect: true,
+    canReadCustomRules: true,
+    readOnly: true,
+    reason: "服务未运行，只能查看自定义规则。",
+  },
+  {
+    kind: "homeProxy",
+    displayName: "HomeProxy",
+    version: "0.9.11",
+    serviceState: "stopped",
+    capabilities: ["readOnlyDiagnostics"],
+    supportLevel: "detectedOnly",
+    canSelect: false,
+    canReadCustomRules: false,
+    readOnly: true,
+    reason: "已检测到 HomeProxy，本版本尚未提供适配器。",
+  },
+  {
+    kind: "passWall",
+    displayName: "PassWall2",
+    version: "25.7.1",
+    serviceState: "stopped",
+    capabilities: ["readOnlyDiagnostics"],
+    supportLevel: "detectedOnly",
+    canSelect: false,
+    canReadCustomRules: false,
+    readOnly: true,
+    reason: "已检测到 PassWall2，本版本尚未提供适配器。",
+  },
+];
+
+let demoPluginState: RouterPluginState = {
+  plugins: demoPlugins,
+  selectedPlugin: "openClash",
+  selectionReason: "autoRunning",
+  requiresManualSelection: false,
+  runningPluginCount: 1,
+  canWrite: true,
+  stateToken: "demo-openclash-running",
+};
 
 function demoNormalizeDomain(input: string, suffix: boolean) {
   const candidate = input.includes("://") ? input : `https://${input}`;
@@ -77,18 +145,7 @@ export async function discoverRouter(input: RouterProfileInput): Promise<RouterS
       release: "24.10 (演示模式)",
       hostKeyFingerprint: "SHA256:demo-fingerprint",
       needsHostKeyTrust: !input.trustHostKey,
-      selectedPlugin: "openClash",
-      plugins: [
-        {
-          kind: "openClash",
-          displayName: "OpenClash",
-          version: "0.47.028-beta",
-          serviceState: "running",
-          coreVersion: "Mihomo demo",
-          capabilities: ["domainRules", "policyGroups", "runtimeVerification", "rollback"],
-          readOnly: false,
-        },
-      ],
+      pluginState: demoPluginState,
     };
   }
   return invoke("discover_router", { input });
@@ -116,8 +173,25 @@ export async function listCustomRules(profileId: string): Promise<CustomRulesSna
   return invoke("list_custom_rules", { profileId });
 }
 
-export async function selectPlugin(profileId: string, plugin: "openClash" | "nikki"): Promise<void> {
-  if (!isTauri()) return;
+export async function refreshPluginState(profileId: string): Promise<RouterPluginState> {
+  if (!isTauri()) return demoPluginState;
+  return invoke("refresh_plugin_state", { profileId });
+}
+
+export async function selectPlugin(profileId: string, plugin: "openClash" | "nikki"): Promise<RouterPluginState> {
+  if (!isTauri()) {
+    const selected = demoPlugins.find((item) => item.kind === plugin)!;
+    demoPluginState = {
+      ...demoPluginState,
+      selectedPlugin: plugin,
+      selectionReason: "manual",
+      requiresManualSelection: false,
+      canWrite: selected.serviceState === "running" && !selected.readOnly,
+      writeBlockReason: selected.serviceState === "running" && !selected.readOnly ? undefined : selected.reason,
+      stateToken: `demo-${plugin}-${selected.serviceState}`,
+    };
+    return demoPluginState;
+  }
   return invoke("select_plugin", { profileId, plugin });
 }
 
@@ -139,6 +213,7 @@ export async function planRuleChange(profileId: string, draft: RuleDraft): Promi
       id: crypto.randomUUID(),
       profileId,
       plugin: "openClash",
+      pluginStateToken: demoPluginState.stateToken,
       operation: "create",
       rule: {
         id: crypto.randomUUID(),
@@ -180,6 +255,7 @@ export async function planRuleRemoval(profileId: string, rule: RuleSpec): Promis
       id: crypto.randomUUID(),
       profileId,
       plugin: "openClash",
+      pluginStateToken: demoPluginState.stateToken,
       operation: "delete",
       rule,
       preview: `将删除本助手创建的规则“${rule.normalizedDomain} → ${rule.action.type === "direct" ? "DIRECT" : rule.action.type === "reject" ? "REJECT" : rule.action.name}”。应用前会备份配置，不会修改其他规则。`,
@@ -230,6 +306,156 @@ export async function verifyRule(profileId: string, ruleId: string): Promise<Ver
 
 export async function rollbackChange(profileId: string, backupId: string): Promise<VerificationReport> {
   return invoke("rollback_change", { profileId, backupId });
+}
+
+function emptyDnsChain(): DnsChainSnapshot {
+  return {
+    activeAdapters: [],
+    clientNodes: [],
+    routerNodes: [],
+    observations: [],
+    warnings: [],
+  };
+}
+
+function demoDnsChain(): DnsChainSnapshot {
+  return {
+    activeAdapters: ["以太网"],
+    clientNodes: [
+      { id: "demo-adapter", label: "本机：以太网", detail: "网关 192.168.1.1", confidence: "confirmed", evidence: "由当前 Windows 网卡 API 读取" },
+      { id: "demo-router-dns", label: "软路由 DNS", detail: "192.168.1.1:53", confidence: "confirmed", evidence: "Windows DNS 与软路由地址匹配" },
+    ],
+    routerNodes: [
+      { id: "demo-dnsmasq", label: "dnsmasq", detail: "局域网入口 :53", confidence: "confirmed", evidence: "路由器进程与配置共同确认" },
+      { id: "demo-openclash", label: "OpenClash DNS", detail: "127.0.0.1:7874", confidence: "confirmed", evidence: "配置指向该端口，且服务正在运行" },
+      { id: "demo-upstream", label: "加密 DNS 上游", detail: "检测到 DoH 配置", confidence: "inferred", evidence: "根据脱敏配置推断，未进行全程抓包" },
+    ],
+    observations: [
+      { source: "当前 Windows 系统解析器", target: "www.baidu.com", success: true, elapsedMs: 18, detail: "只证明解析成功，不能据此证明使用了加密 DNS。" },
+      { source: "软路由默认解析器", target: "www.google.com", success: true, detail: "只读解析测试，不等于完整数据包路径。" },
+    ],
+    warnings: [],
+  };
+}
+
+/** Backend/frontend version skew or partial payloads must not crash the DNS page. */
+function normalizeDnsSnapshot(snapshot: DnsProtectionSnapshot): DnsProtectionSnapshot {
+  const chain = snapshot.chain ?? emptyDnsChain();
+  return {
+    ...snapshot,
+    localUpstreams: snapshot.localUpstreams ?? [],
+    risks: snapshot.risks ?? [],
+    checks: snapshot.checks ?? [],
+    chain: {
+      activeAdapters: chain.activeAdapters ?? [],
+      clientNodes: chain.clientNodes ?? [],
+      routerNodes: chain.routerNodes ?? [],
+      observations: chain.observations ?? [],
+      warnings: chain.warnings ?? [],
+    },
+  };
+}
+
+function normalizeDnsReport(report: DnsProtectionReport): DnsProtectionReport {
+  return {
+    ...report,
+    messages: report.messages ?? [],
+    snapshot: normalizeDnsSnapshot(report.snapshot),
+  };
+}
+
+function demoDnsSnapshot(): DnsProtectionSnapshot {
+  return demoDnsProtected
+    ? {
+        plugin: "openClash",
+        status: "protected",
+        summary: "当前 OpenClash 已使用加密 DNS，未发现明文上游。",
+        supported: true,
+        canApply: false,
+        dnsEnabled: true,
+        enhancedMode: "fake-ip",
+        dnsmasqToOpenclash: true,
+        encryptedUpstreamCount: 8,
+        plaintextUpstreamCount: 0,
+        localUpstreams: [],
+        respectRules: true,
+        managedByAssistant: true,
+        risks: [],
+        checks: ["百度解析测试通过（仅表示解析可用，不证明使用加密 DNS）。", "Google 解析测试通过（仅表示解析可用，不证明使用加密 DNS）。"],
+        chain: demoDnsChain(),
+      }
+    : {
+        plugin: "openClash",
+        status: "needsAttention",
+        summary: "发现可以安全修复的 OpenClash DNS 风险。",
+        supported: true,
+        canApply: true,
+        dnsEnabled: true,
+        enhancedMode: "fake-ip",
+        dnsmasqToOpenclash: true,
+        encryptedUpstreamCount: 1,
+        plaintextUpstreamCount: 2,
+        localUpstreams: [],
+        respectRules: false,
+        managedByAssistant: false,
+        risks: ["发现 2 个明文或系统 DNS 上游，可能被污染或泄漏。", "DNS 连接没有明确跟随分流规则。"],
+        checks: ["百度解析测试通过（仅表示解析可用，不证明使用加密 DNS）。", "Google 解析测试通过（仅表示解析可用，不证明使用加密 DNS）。"],
+        chain: demoDnsChain(),
+      };
+}
+
+export async function inspectDnsProtection(profileId: string): Promise<DnsProtectionSnapshot> {
+  if (!isTauri()) return demoDnsSnapshot();
+  return normalizeDnsSnapshot(await invoke("inspect_dns_protection", { profileId }));
+}
+
+export async function planDnsProtection(profileId: string): Promise<DnsProtectionPlan> {
+  if (!isTauri()) {
+    const plan: DnsProtectionPlan = {
+      id: crypto.randomUUID(),
+      profileId,
+      plugin: "openClash",
+      pluginStateToken: demoPluginState.stateToken,
+      preview: "将在 OpenClash 官方自定义覆写脚本中加入助手专属 DNS 块：国内使用阿里/腾讯加密 DoH，国外使用 Cloudflare/Google 加密 DoH并跟随现有分流规则；不会修改订阅、DHCP或防火墙。",
+      canApply: true,
+      requiresReload: true,
+      interruptionSeconds: 20,
+    };
+    demoDnsPlans.set(plan.id, plan);
+    return plan;
+  }
+  return invoke("plan_dns_protection", { profileId });
+}
+
+export async function applyDnsProtection(planId: string): Promise<DnsProtectionReport> {
+  if (!isTauri()) {
+    demoDnsPlans.delete(planId);
+    demoDnsProtected = true;
+    return {
+      changeId: planId,
+      success: true,
+      rolledBack: false,
+      backupId: "dns-demo-backup",
+      messages: ["演示模式：OpenClash 基础 DNS 防护已通过验证。"],
+      snapshot: demoDnsSnapshot(),
+    };
+  }
+  return normalizeDnsReport(await invoke("apply_dns_protection", { planId }));
+}
+
+export async function rollbackDnsProtection(profileId: string, backupId: string): Promise<DnsProtectionReport> {
+  if (!isTauri()) {
+    demoDnsProtected = false;
+    return {
+      changeId: `dns-rollback:${backupId}`,
+      success: true,
+      rolledBack: true,
+      backupId,
+      messages: ["演示模式：已恢复应用前的 DNS 配置。"],
+      snapshot: demoDnsSnapshot(),
+    };
+  }
+  return normalizeDnsReport(await invoke("rollback_dns_protection", { profileId, backupId }));
 }
 
 export async function listHistory(profileId?: string): Promise<OperationHistoryItem[]> {

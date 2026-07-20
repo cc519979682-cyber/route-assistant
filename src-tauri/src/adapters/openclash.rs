@@ -15,8 +15,11 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 pub const CUSTOM_RULES_PATH: &str = "/etc/openclash/custom/openclash_custom_rules.list";
+pub const CUSTOM_HOSTS_PATH: &str = "/etc/openclash/custom/openclash_custom_hosts.list";
 const BEGIN_MARKER: &str = "## ROUTE-ASSISTANT-BEGIN (managed, do not edit)";
 const END_MARKER: &str = "## ROUTE-ASSISTANT-END";
+const HOSTS_BEGIN_MARKER: &str = "# ROUTE-ASSISTANT-HOSTS-BEGIN (managed, do not edit)";
+const HOSTS_END_MARKER: &str = "# ROUTE-ASSISTANT-HOSTS-END";
 
 fn managed_rule_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -413,6 +416,58 @@ pub async fn list_custom_rules(session: &SshSession) -> AppResult<CustomRulesSna
     Ok(parse_custom_rules(&output.stdout))
 }
 
+
+fn reject_hosts_entries(rule: &RuleSpec) -> Vec<String> {
+    if !matches!(rule.action, RuleAction::Reject) {
+        return Vec::new();
+    }
+    let domain = &rule.normalized_domain;
+    match rule.scope {
+        MatchScope::Exact => vec![format!("'{domain}': 0.0.0.0")],
+        MatchScope::Suffix => vec![
+            format!("'{domain}': 0.0.0.0"),
+            format!("'+.{domain}': 0.0.0.0"),
+        ],
+    }
+}
+
+pub fn render_reject_hosts(content: &str, rules: &[RuleSpec]) -> String {
+    let mut entries = Vec::new();
+    for rule in rules {
+        entries.extend(reject_hosts_entries(rule));
+    }
+    entries.sort();
+    entries.dedup();
+
+    let mut block = vec![HOSTS_BEGIN_MARKER.to_owned()];
+    block.extend(entries);
+    block.push(HOSTS_END_MARKER.to_owned());
+    let block = block.join("\n");
+
+    let mut lines: Vec<String> = content
+        .replace("\r\n", "\n")
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect();
+    let begin = lines
+        .iter()
+        .position(|line| line.trim() == HOSTS_BEGIN_MARKER);
+    let end = lines.iter().position(|line| line.trim() == HOSTS_END_MARKER);
+    match (begin, end) {
+        (Some(begin), Some(end)) if begin <= end => {
+            lines.splice(begin..=end, block.lines().map(ToOwned::to_owned));
+        }
+        _ => {
+            if !lines.is_empty() && !lines.last().map(|line| line.trim().is_empty()).unwrap_or(true) {
+                lines.push(String::new());
+            }
+            lines.extend(block.lines().map(ToOwned::to_owned));
+            lines.push(String::new());
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
 pub async fn apply_rule(
     session: &SshSession,
     change_id: &str,
@@ -447,23 +502,183 @@ pub async fn apply_rule(
         .map_err(|error| {
             AppError::Validation(format!("OpenClash 自定义规则语法检查失败：{error}"))
         })?;
+    let hosts_current = session
+        .run(&format!(
+            "cat -- {} 2>/dev/null",
+            shell_quote(CUSTOM_HOSTS_PATH)
+        ))
+        .await?
+        .stdout;
+    let hosts_rendered = render_reject_hosts(&hosts_current, &rules);
+    let hosts_candidate = format!("{CUSTOM_HOSTS_PATH}.route-assistant-candidate");
+    session
+        .write_file(&hosts_candidate, hosts_rendered.as_bytes(), 0o600)
+        .await?;
     start_watchdog(session, &backup_id).await?;
     let apply = format!(
-        "mv -f {} {}; chmod 600 {}; uci -q set openclash.config.enable_custom_clash_rules=1; uci -q commit openclash; /etc/init.d/openclash restart >/dev/null 2>&1",
-        shell_quote(&candidate),
-        shell_quote(CUSTOM_RULES_PATH),
-        shell_quote(CUSTOM_RULES_PATH)
+        "set -e; \
+test -s {candidate}; \
+mv -f {candidate} {target}; \
+chmod 600 {target}; \
+grep -F -- {marker} {target} >/dev/null; \
+mv -f {hosts_candidate} {hosts_target}; \
+chmod 600 {hosts_target}; \
+uci -q set openclash.config.enable_custom_clash_rules=1; \
+uci -q set openclash.config.custom_host=1; \
+uci -q commit openclash; \
+test \"$(uci -q get openclash.config.enable_custom_clash_rules)\" = 1; \
+test \"$(uci -q get openclash.config.custom_host)\" = 1; \
+/etc/init.d/openclash restart >/tmp/route-assistant-openclash-restart.log 2>&1",
+        candidate = shell_quote(&candidate),
+        target = shell_quote(CUSTOM_RULES_PATH),
+        marker = shell_quote("ROUTE-ASSISTANT-BEGIN"),
+        hosts_candidate = shell_quote(&hosts_candidate),
+        hosts_target = shell_quote(CUSTOM_HOSTS_PATH),
     );
     session.run_checked(&apply).await?;
-    sleep(Duration::from_secs(8)).await;
-    let mut report = verify_runtime_rule(
-        session,
-        &PluginKind::OpenClash,
-        change_id,
-        rule,
-        Some(backup_id.clone()),
-    )
-    .await;
+    // OpenClash rebuilds a full runtime YAML before the core is ready. Confirm the
+    // merged runtime file and/or Mihomo API, with enough time for large configs.
+    let expected_type = if matches!(rule.scope, MatchScope::Exact) {
+        "DOMAIN"
+    } else {
+        "DOMAIN-SUFFIX"
+    };
+    let expected_line = format!(
+        "{expected_type},{},{}",
+        rule.normalized_domain,
+        rule.action.target()
+    );
+    let expected_type_norm = crate::adapters::normalize_rule_type_token(expected_type);
+    let mut report = VerificationReport {
+        change_id: change_id.to_owned(),
+        success: false,
+        service_state: crate::models::ServiceState::Unknown,
+        core_api_reachable: false,
+        rule_present: false,
+        rule_index: None,
+        hit_verified: false,
+        verification_limited: true,
+        dns_observation: None,
+        rolled_back: false,
+        backup_id: Some(backup_id.clone()),
+        messages: Vec::new(),
+    };
+    for attempt in 0..15 {
+        sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
+        report.service_state = crate::adapters::service_state(session, &PluginKind::OpenClash).await;
+        let enable = session
+            .run("uci -q get openclash.config.enable_custom_clash_rules")
+            .await
+            .map(|output| output.stdout.trim().to_owned())
+            .unwrap_or_default();
+        let runtime_path = session
+            .run(
+                r#"ps w 2>/dev/null | awk '/[c]lash|[m]ihomo/ {for(i=1;i<=NF;i++) if($i=="-f" && (i+1)<=NF){print $(i+1); exit}}'"#,
+            )
+            .await
+            .map(|output| output.stdout.trim().to_owned())
+            .unwrap_or_default();
+        let mut file_has_rule = false;
+        if runtime_path.starts_with('/') {
+            let grep = session
+                .run(&format!(
+                    "grep -F -- {} {} >/dev/null 2>&1; echo $?",
+                    shell_quote(&expected_line),
+                    shell_quote(&runtime_path)
+                ))
+                .await
+                .map(|output| output.stdout.trim().to_owned())
+                .unwrap_or_default();
+            file_has_rule = grep == "0";
+        }
+
+        let mut api_has_rule = false;
+        if let Ok(config) = crate::adapters::api_config(session, &PluginKind::OpenClash).await {
+            if let Ok(runtime) = session
+                .api_get(config.port, config.secret.as_deref(), "/rules")
+                .await
+            {
+                report.core_api_reachable = true;
+                if let Some(rules) = runtime.get("rules").and_then(|value| value.as_array()) {
+                    for (index, item) in rules.iter().enumerate() {
+                        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                        let item_payload =
+                            item.get("payload").and_then(|v| v.as_str()).unwrap_or_default();
+                        let item_proxy =
+                            item.get("proxy").and_then(|v| v.as_str()).unwrap_or_default();
+                        let type_ok =
+                            crate::adapters::normalize_rule_type_token(item_type) == expected_type_norm;
+                        let payload_ok = item_payload.eq_ignore_ascii_case(&rule.normalized_domain);
+                        let proxy_ok = item_proxy == rule.action.target()
+                            || (rule.action.target() == "REJECT"
+                                && matches!(item_proxy, "REJECT" | "REJECT-DROP" | "reject"));
+                        if type_ok && payload_ok && proxy_ok {
+                            api_has_rule = true;
+                            report.rule_index = Some(index);
+                            if let Some(hit_count) =
+                                item.pointer("/extra/hitCount").and_then(|v| v.as_u64())
+                            {
+                                report.hit_verified = hit_count > 0;
+                                report.verification_limited = false;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        report.rule_present = api_has_rule || file_has_rule;
+        report.success = report.rule_present
+            && report.service_state == crate::models::ServiceState::Running
+            && enable == "1";
+        if report.success {
+            report.messages.push(if api_has_rule {
+                if report.hit_verified {
+                    "规则已生效，并检测到实际命中。".into()
+                } else {
+                    "规则已写入运行配置；尚未观察到实际流量命中。".into()
+                }
+            } else {
+                "规则已合并进 OpenClash 运行配置文件，并已开启自定义规则。".into()
+            });
+            if matches!(rule.action, RuleAction::Reject) {
+                report.messages.push(
+                    "已同时写入 OpenClash hosts 屏蔽（0.0.0.0），避免“绕过大陆 IP / 国内域名 Fake-IP 过滤”导致拒绝规则不生效。".into(),
+                );
+            }
+            break;
+        }
+        if attempt + 1 == 15 {
+            if enable != "1" {
+                report
+                    .messages
+                    .push("OpenClash 的“自定义规则”开关未保持开启。".into());
+            }
+            if !file_has_rule {
+                report.messages.push(format!(
+                    "运行配置文件中未找到 `{expected_line}`（路径：{}）。",
+                    if runtime_path.is_empty() {
+                        "未知"
+                    } else {
+                        runtime_path.as_str()
+                    }
+                ));
+            }
+            if report.core_api_reachable && !api_has_rule {
+                report.messages.push(format!(
+                    "核心 API 中也没有找到目标规则（期望 {expected_line}）。"
+                ));
+            } else if !report.core_api_reachable {
+                report
+                    .messages
+                    .push("暂时无法读取 Mihomo 核心 API。".into());
+            }
+            if report.service_state != crate::models::ServiceState::Running {
+                report.messages.push("OpenClash 服务未恢复运行。".into());
+            }
+        }
+    }
     if report.success {
         commit_watchdog(session, &backup_id).await?;
     } else {
@@ -512,13 +727,26 @@ pub async fn remove_rule(
         .map_err(|error| {
             AppError::Validation(format!("OpenClash 自定义规则语法检查失败：{error}"))
         })?;
+    let hosts_current = session
+        .run(&format!(
+            "cat -- {} 2>/dev/null",
+            shell_quote(CUSTOM_HOSTS_PATH)
+        ))
+        .await?
+        .stdout;
+    let hosts_rendered = render_reject_hosts(&hosts_current, &rules);
+    let hosts_candidate = format!("{CUSTOM_HOSTS_PATH}.route-assistant-candidate");
+    session
+        .write_file(&hosts_candidate, hosts_rendered.as_bytes(), 0o600)
+        .await?;
     start_watchdog(session, &backup_id).await?;
     session
         .run_checked(&format!(
-            "mv -f {} {}; chmod 600 {}; /etc/init.d/openclash restart >/dev/null 2>&1",
-            shell_quote(&candidate),
-            shell_quote(CUSTOM_RULES_PATH),
-            shell_quote(CUSTOM_RULES_PATH)
+            "set -e; test -f {candidate}; mv -f {candidate} {target}; chmod 600 {target}; mv -f {hosts_candidate} {hosts_target}; chmod 600 {hosts_target}; /etc/init.d/openclash restart >/tmp/route-assistant-openclash-restart.log 2>&1",
+            candidate = shell_quote(&candidate),
+            target = shell_quote(CUSTOM_RULES_PATH),
+            hosts_candidate = shell_quote(&hosts_candidate),
+            hosts_target = shell_quote(CUSTOM_HOSTS_PATH),
         ))
         .await?;
     sleep(Duration::from_secs(8)).await;
@@ -558,9 +786,10 @@ pub async fn rollback(session: &SshSession, backup_id: &str) -> AppResult<()> {
     validate_backup_id(backup_id)?;
     let directory = format!("/etc/route-assistant/backups/{backup_id}");
     let command = format!(
-        "test -d {d}; if test -f {d}/custom_rules.existed; then cp -f {d}/openclash_custom_rules.list {target}; else rm -f {target}; fi; uci -q import openclash < {d}/openclash.uci; uci -q commit openclash; /etc/init.d/openclash restart >/dev/null 2>&1",
+        "test -d {d}; if test -f {d}/custom_rules.existed; then cp -f {d}/openclash_custom_rules.list {target}; else rm -f {target}; fi; if test -f {d}/custom_hosts.existed; then cp -f {d}/openclash_custom_hosts.list {hosts}; else rm -f {hosts}; fi; uci -q import openclash < {d}/openclash.uci; uci -q commit openclash; /etc/init.d/openclash restart >/dev/null 2>&1",
         d = shell_quote(&directory),
-        target = shell_quote(CUSTOM_RULES_PATH)
+        target = shell_quote(CUSTOM_RULES_PATH),
+        hosts = shell_quote(CUSTOM_HOSTS_PATH)
     );
     session.run_checked(&command).await.map(|_| ())
 }
@@ -573,9 +802,10 @@ async fn create_backup(session: &SshSession) -> AppResult<String> {
     );
     let directory = format!("/etc/route-assistant/backups/{id}");
     let command = format!(
-        r#"umask 077; mkdir -p {d}; chmod 700 /etc/route-assistant /etc/route-assistant/backups {d}; if test -f {target}; then cp -p {target} {d}/openclash_custom_rules.list; touch {d}/custom_rules.existed; fi; uci -q export openclash > {d}/openclash.uci; /etc/init.d/openclash status > {d}/service.status 2>&1 || true; ls -1dt /etc/route-assistant/backups/* 2>/dev/null | tail -n +11 | while read old; do case "$old" in /etc/route-assistant/backups/*) rm -rf -- "$old";; esac; done"#,
+        r#"umask 077; mkdir -p {d}; chmod 700 /etc/route-assistant /etc/route-assistant/backups {d}; if test -f {target}; then cp -p {target} {d}/openclash_custom_rules.list; touch {d}/custom_rules.existed; fi; if test -f {hosts}; then cp -p {hosts} {d}/openclash_custom_hosts.list; touch {d}/custom_hosts.existed; fi; uci -q export openclash > {d}/openclash.uci; /etc/init.d/openclash status > {d}/service.status 2>&1 || true; ls -1dt /etc/route-assistant/backups/* 2>/dev/null | tail -n +11 | while read old; do case "$old" in /etc/route-assistant/backups/*) rm -rf -- "$old";; esac; done"#,
         d = shell_quote(&directory),
-        target = shell_quote(CUSTOM_RULES_PATH)
+        target = shell_quote(CUSTOM_RULES_PATH),
+        hosts = shell_quote(CUSTOM_HOSTS_PATH)
     );
     session.run_checked(&command).await?;
     Ok(id)
@@ -587,10 +817,11 @@ async fn start_watchdog(session: &SshSession, backup_id: &str) -> AppResult<()> 
     let marker = format!("/tmp/route-assistant-{backup_id}.commit");
     let script = format!("/tmp/route-assistant-{backup_id}.rollback.sh");
     let body = format!(
-        "#!/bin/sh\nsleep 120\n[ -f {marker} ] && exit 0\nif [ -f {dir}/custom_rules.existed ]; then cp -f {dir}/openclash_custom_rules.list {target}; else rm -f {target}; fi\nuci -q import openclash < {dir}/openclash.uci\nuci -q commit openclash\n/etc/init.d/openclash restart >/dev/null 2>&1\n",
+        "#!/bin/sh\nsleep 120\n[ -f {marker} ] && exit 0\nif [ -f {dir}/custom_rules.existed ]; then cp -f {dir}/openclash_custom_rules.list {target}; else rm -f {target}; fi\nif [ -f {dir}/custom_hosts.existed ]; then cp -f {dir}/openclash_custom_hosts.list {hosts}; else rm -f {hosts}; fi\nuci -q import openclash < {dir}/openclash.uci\nuci -q commit openclash\n/etc/init.d/openclash restart >/dev/null 2>&1\n",
         marker = shell_quote(&marker),
         dir = shell_quote(&directory),
-        target = shell_quote(CUSTOM_RULES_PATH)
+        target = shell_quote(CUSTOM_RULES_PATH),
+        hosts = shell_quote(CUSTOM_HOSTS_PATH)
     );
     session.write_file(&script, body.as_bytes(), 0o700).await?;
     session
@@ -629,6 +860,25 @@ mod tests {
             managed: true,
             source: Some(CUSTOM_RULES_PATH.into()),
         }
+    }
+
+    #[test]
+    fn render_reject_hosts_for_suffix_reject() {
+        let rule = RuleSpec {
+            id: "id".into(),
+            scope: MatchScope::Suffix,
+            domain: "baidu.com".into(),
+            normalized_domain: "baidu.com".into(),
+            action: RuleAction::Reject,
+            enabled: true,
+            note: None,
+            managed: true,
+            source: None,
+        };
+        let rendered = render_reject_hosts("# comment\n", &[rule]);
+        assert!(rendered.contains("ROUTE-ASSISTANT-HOSTS-BEGIN"));
+        assert!(rendered.contains("'baidu.com': 0.0.0.0"));
+        assert!(rendered.contains("'+.baidu.com': 0.0.0.0"));
     }
 
     #[test]

@@ -9,8 +9,28 @@
 ## 配置所有权
 
 - OpenClash 仅管理 `/etc/openclash/custom/openclash_custom_rules.list` 中带专属起止标记的块。
+- OpenClash DNS 防护仅管理 `/etc/openclash/custom/openclash_custom_overwrite.sh` 中带 `ROUTE-ASSISTANT-DNS` 起止标记的块；重复或破损标记会拒绝写入。
 - Nikki 仅管理名称以 `route_assistant_` 开头且包含助手编号的 UCI rule 段。
-- 其他规则只读；不编辑订阅、节点、DNS、DHCP 或防火墙配置。
+- 其他规则只读；不编辑订阅、节点、DHCP 或防火墙配置。
+
+## 多插件边界
+
+- OpenClash 与 Nikki 是 v0.4 唯一可管理的插件；HomeProxy、PassWall/PassWall2 仅检测安装和运行状态，不读取其配置。
+- OpenClash 与 Nikki 同时运行时必须由用户明确选择当前管理对象，每次只调用所选插件的适配器。
+- 检测到运行中的 HomeProxy、PassWall 或 PassWall2 时持续警告，但允许用户修改明确选中的 OpenClash/Nikki；每次仍只调用当前管理对象的适配器。
+- 每次写入前重新检测全部插件；插件状态与预览时不一致时，原预览立即作废。
+- 软件不启动、停止、重载非当前管理对象，也不改变任何插件的开机启动状态。
+
+## DNS 防污染边界
+
+- 只读取 OpenClash 自己的运行配置，不读取同机 Nikki、HomeProxy 或 PassWall 的 Mihomo 配置。
+- 只将 OpenClash DNS 上游改为预设加密 DoH，并启用 `respect-rules`；保留现有 Fake-IP/Redir-Host 模式。
+- 只有确认 dnsmasq 或 OpenClash 现有重定向已让局域网 DNS 进入 OpenClash 时才允许自动应用；无法确认时只诊断。
+- 不修改 dnsmasq、DHCP、防火墙、SmartDNS、AdGuard Home、订阅或节点。多个代理插件同时接管 DNS/透明代理时，软件只能提示风险，不能承诺最终链路。
+- 当前电脑的 DNS 链路从 Windows 网卡 API 只读获取，包含活动网卡、默认网关和 IPv4/IPv6 DNS；VPN、Tailscale、外部 DNS 等只标记为“可能绕过”。软件不会读取浏览器历史或声称能够确认浏览器内置 DoH。
+- 路由器链路只返回白名单化的服务状态、监听端口、环回地址连接和协议数量，不返回完整配置行、上游 URL、认证字段、订阅或节点。
+- 百度、Google 等解析观测只证明当次查询成功或失败，不能单独证明全程使用加密 DNS。未启用抓包，因此 UI 只能使用“已确认、根据配置推断、未知、可能绕过”。
+- 如果 OpenClash 上游指向路由器环回地址上的 AdGuard Home、SmartDNS 或其他本机服务，环回跳转不计为公网明文泄漏；助手会将其视为复杂组合链路并禁止基础一键修复覆盖。
 
 ## 变更事务
 

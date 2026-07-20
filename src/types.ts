@@ -1,6 +1,8 @@
 export type Locale = "zh-CN" | "en";
 export type AuthKind = "password" | "privateKey";
-export type PluginKind = "openClash" | "nikki" | "unsupported";
+export type PluginKind = "openClash" | "nikki" | "homeProxy" | "passWall" | "unsupported";
+export type PluginSupportLevel = "managed" | "detectedOnly";
+export type PluginSelectionReason = "autoRunning" | "autoOnlyManaged" | "manual";
 export type ServiceState = "running" | "stopped" | "unknown";
 export type MatchScope = "exact" | "suffix";
 export type RuleAction =
@@ -39,16 +41,30 @@ export interface DetectedPlugin {
   serviceState: ServiceState;
   coreVersion?: string;
   capabilities: string[];
+  supportLevel: PluginSupportLevel;
+  canSelect: boolean;
+  canReadCustomRules: boolean;
   readOnly: boolean;
   reason?: string;
+}
+
+export interface RouterPluginState {
+  plugins: DetectedPlugin[];
+  selectedPlugin?: PluginKind;
+  selectionReason?: PluginSelectionReason;
+  requiresManualSelection: boolean;
+  runningPluginCount: number;
+  canWrite: boolean;
+  writeBlockReason?: string;
+  riskWarning?: string;
+  stateToken: string;
 }
 
 export interface RouterSnapshot {
   profile: RouterProfile;
   distribution: string;
   release?: string;
-  plugins: DetectedPlugin[];
-  selectedPlugin?: PluginKind;
+  pluginState: RouterPluginState;
   hostKeyFingerprint: string;
   needsHostKeyTrust: boolean;
 }
@@ -120,6 +136,7 @@ export interface ChangePlan {
   id: string;
   profileId: string;
   plugin: PluginKind;
+  pluginStateToken: string;
   operation: "create" | "update" | "delete";
   rule: RuleSpec;
   preview: string;
@@ -134,6 +151,74 @@ export interface DnsObservation {
   addresses: string[];
   elapsedMs?: number;
   note: string;
+}
+
+export type DnsProtectionStatus = "protected" | "needsAttention" | "unsupported" | "unknown";
+
+export type DnsChainConfidence = "confirmed" | "inferred" | "unknown" | "possibleBypass";
+
+export interface DnsChainNode {
+  id: string;
+  label: string;
+  detail?: string;
+  confidence: DnsChainConfidence;
+  evidence: string;
+}
+
+export interface DnsResolutionObservation {
+  source: string;
+  target: string;
+  success?: boolean;
+  elapsedMs?: number;
+  detail: string;
+}
+
+export interface DnsChainSnapshot {
+  activeAdapters: string[];
+  clientNodes: DnsChainNode[];
+  routerNodes: DnsChainNode[];
+  observations: DnsResolutionObservation[];
+  warnings: string[];
+}
+
+export interface DnsProtectionSnapshot {
+  plugin: PluginKind;
+  status: DnsProtectionStatus;
+  summary: string;
+  supported: boolean;
+  canApply: boolean;
+  dnsEnabled?: boolean;
+  enhancedMode?: string;
+  dnsmasqToOpenclash?: boolean;
+  encryptedUpstreamCount?: number;
+  plaintextUpstreamCount?: number;
+  localUpstreams?: string[];
+  respectRules?: boolean;
+  managedByAssistant: boolean;
+  risks: string[];
+  checks: string[];
+  /** Older backends may omit this field; UI/api normalize to empty chain. */
+  chain?: DnsChainSnapshot;
+}
+
+export interface DnsProtectionPlan {
+  id: string;
+  profileId: string;
+  plugin: PluginKind;
+  pluginStateToken: string;
+  preview: string;
+  canApply: boolean;
+  requiresReload: boolean;
+  interruptionSeconds: number;
+}
+
+export interface DnsProtectionReport {
+  changeId: string;
+  success: boolean;
+  rolledBack: boolean;
+  backupId?: string;
+  messages: string[];
+  snapshot: DnsProtectionSnapshot;
 }
 
 export interface VerificationReport {

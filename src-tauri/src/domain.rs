@@ -13,8 +13,8 @@ pub fn normalize_domain(input: &str, scope: &MatchScope) -> AppResult<String> {
     } else {
         format!("https://{trimmed}")
     };
-    let parsed = Url::parse(&candidate)
-        .map_err(|_| AppError::Validation("无法识别域名或网址".into()))?;
+    let parsed =
+        Url::parse(&candidate).map_err(|_| AppError::Validation("无法识别域名或网址".into()))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| AppError::Validation("网址中没有有效域名".into()))?
@@ -22,7 +22,9 @@ pub fn normalize_domain(input: &str, scope: &MatchScope) -> AppResult<String> {
         .to_lowercase();
 
     if host.parse::<std::net::IpAddr>().is_ok() {
-        return Err(AppError::Validation("首版只支持域名，不支持 IP 地址规则".into()));
+        return Err(AppError::Validation(
+            "首版只支持域名，不支持 IP 地址规则".into(),
+        ));
     }
     if host.contains('*') || host.contains('_') {
         return Err(AppError::Validation("请输入普通域名，不需要通配符".into()));
@@ -31,8 +33,14 @@ pub fn normalize_domain(input: &str, scope: &MatchScope) -> AppResult<String> {
     let ascii = idna::domain_to_ascii(&host)
         .map_err(|_| AppError::Validation("国际化域名格式无效".into()))?;
     let labels: Vec<&str> = ascii.split('.').collect();
-    if labels.len() < 2 || labels.iter().any(|label| label.is_empty() || label.len() > 63) {
-        return Err(AppError::Validation("请输入完整域名，例如 www.baidu.com".into()));
+    if labels.len() < 2
+        || labels
+            .iter()
+            .any(|label| label.is_empty() || label.len() > 63)
+    {
+        return Err(AppError::Validation(
+            "请输入完整域名，例如 www.baidu.com".into(),
+        ));
     }
 
     if matches!(scope, MatchScope::Suffix) {

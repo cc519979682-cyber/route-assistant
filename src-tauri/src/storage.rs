@@ -32,11 +32,15 @@ impl Store {
             .ok_or_else(|| AppError::Storage("无法确定应用数据目录".into()))?;
         std::fs::create_dir_all(dirs.data_local_dir())
             .map_err(|error| AppError::Storage(error.to_string()))?;
-        Self::open(dirs.data_local_dir().join("route-assistant.db"), dirs.data_local_dir())
+        Self::open(
+            dirs.data_local_dir().join("route-assistant.db"),
+            dirs.data_local_dir(),
+        )
     }
 
     pub fn open(path: impl AsRef<Path>, data_dir: impl AsRef<Path>) -> AppResult<Self> {
-        let connection = Connection::open(path).map_err(|error| AppError::Storage(error.to_string()))?;
+        let connection =
+            Connection::open(path).map_err(|error| AppError::Storage(error.to_string()))?;
         connection
             .execute_batch(
                 r#"
@@ -92,8 +96,15 @@ impl Store {
         &self.data_dir
     }
 
-    pub fn save_profile(&self, input: &RouterProfileInput, fingerprint: &str) -> AppResult<RouterProfile> {
-        let id = input.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    pub fn save_profile(
+        &self,
+        input: &RouterProfileInput,
+        fingerprint: &str,
+    ) -> AppResult<RouterProfile> {
+        let id = input
+            .id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let credential_ref = format!("router:{id}");
         let payload = CredentialPayload {
             password: input.password.clone(),
@@ -192,7 +203,10 @@ impl Store {
             .ok_or_else(|| AppError::Storage("找不到软路由档案".into()))
     }
 
-    pub fn profile_input_with_secret(&self, profile: &RouterProfile) -> AppResult<RouterProfileInput> {
+    pub fn profile_input_with_secret(
+        &self,
+        profile: &RouterProfile,
+    ) -> AppResult<RouterProfileInput> {
         let secret = Entry::new(KEYRING_SERVICE, &profile.credential_ref)
             .map_err(|error| AppError::Credential(error.to_string()))?
             .get_password()
@@ -214,7 +228,8 @@ impl Store {
     }
 
     pub fn save_plan(&self, plan: &ChangePlan) -> AppResult<()> {
-        let payload = serde_json::to_string(plan).map_err(|error| AppError::Storage(error.to_string()))?;
+        let payload =
+            serde_json::to_string(plan).map_err(|error| AppError::Storage(error.to_string()))?;
         self.db()?
             .execute(
                 "INSERT INTO change_plans (id,profile_id,payload,created_at) VALUES (?1,?2,?3,?4)",
@@ -274,7 +289,9 @@ impl Store {
         } else {
             "SELECT id,profile_id,plugin,operation,summary,backup_id,success,created_at FROM operation_history ORDER BY created_at DESC LIMIT 100"
         };
-        let mut statement = connection.prepare(sql).map_err(|error| AppError::Storage(error.to_string()))?;
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| AppError::Storage(error.to_string()))?;
         let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<OperationHistoryItem> {
             let created: String = row.get(7)?;
             Ok(OperationHistoryItem {
@@ -320,6 +337,8 @@ fn plugin_to_db(kind: &PluginKind) -> &'static str {
     match kind {
         PluginKind::OpenClash => "openclash",
         PluginKind::Nikki => "nikki",
+        PluginKind::HomeProxy => "homeproxy",
+        PluginKind::PassWall => "passwall",
         PluginKind::Unsupported => "unsupported",
     }
 }
@@ -328,6 +347,8 @@ fn plugin_from_db(value: &str) -> PluginKind {
     match value {
         "openclash" => PluginKind::OpenClash,
         "nikki" => PluginKind::Nikki,
+        "homeproxy" => PluginKind::HomeProxy,
+        "passwall" => PluginKind::PassWall,
         _ => PluginKind::Unsupported,
     }
 }

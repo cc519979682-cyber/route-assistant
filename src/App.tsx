@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  applyDnsProtection,
   applyRuleChange,
   discoverRouter,
   exportDiagnostics,
+  inspectDnsProtection,
   listHistory,
   listCustomRules,
   listPolicyTargets,
   listProfiles,
+  planDnsProtection,
   planRuleChange,
   planRuleRemoval,
   planRuleUpdate,
+  refreshPluginState,
+  rollbackDnsProtection,
   selectPlugin,
 } from "./api";
 import { createTranslator } from "./i18n";
@@ -19,11 +24,16 @@ import type {
   CustomRuleOwner,
   CustomRuleRecord,
   CustomRulesSnapshot,
+  DnsProtectionPlan,
+  DnsProtectionReport,
+  DnsProtectionSnapshot,
+  DnsChainConfidence,
   Locale,
   OperationHistoryItem,
   PolicyTarget,
   RouterProfile,
   RouterProfileInput,
+  RouterPluginState,
   RouterSnapshot,
   RuleDraft,
   RuleSpec,
@@ -31,7 +41,7 @@ import type {
 } from "./types";
 
 type Screen = "connect" | "dashboard";
-type Tab = "overview" | "rules" | "diagnostics" | "history";
+type Tab = "overview" | "rules" | "dnsProtection" | "diagnostics" | "history";
 
 const initialConnection: RouterProfileInput = {
   name: "办公室软路由",
@@ -44,7 +54,7 @@ const initialConnection: RouterProfileInput = {
 
 const initialDraft: RuleDraft = {
   domain: "",
-  scope: "exact",
+  scope: "suffix",
   action: { type: "direct" },
   note: "",
 };
@@ -52,6 +62,12 @@ const initialDraft: RuleDraft = {
 function App() {
   const [locale, setLocale] = useState<Locale>("zh-CN");
   const t = useMemo(() => createTranslator(locale), [locale]);
+  const confidenceLabel = (confidence: DnsChainConfidence) => {
+    if (confidence === "confirmed") return t("confirmed");
+    if (confidence === "inferred") return t("inferred");
+    if (confidence === "possibleBypass") return t("possibleBypass");
+    return t("chainUnknown");
+  };
   const [screen, setScreen] = useState<Screen>("connect");
   const [tab, setTab] = useState<Tab>("overview");
   const [profiles, setProfiles] = useState<RouterProfile[]>([]);
@@ -63,6 +79,9 @@ function App() {
   const [draft, setDraft] = useState<RuleDraft>(initialDraft);
   const [plan, setPlan] = useState<ChangePlan>();
   const [report, setReport] = useState<VerificationReport>();
+  const [dnsSnapshot, setDnsSnapshot] = useState<DnsProtectionSnapshot>();
+  const [dnsPlan, setDnsPlan] = useState<DnsProtectionPlan>();
+  const [dnsReport, setDnsReport] = useState<DnsProtectionReport>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showRuleForm, setShowRuleForm] = useState(false);
@@ -70,6 +89,7 @@ function App() {
   const [ruleSearch, setRuleSearch] = useState("");
   const [modalMode, setModalMode] = useState<"create" | "copy" | "edit" | "delete">("create");
   const [editingRuleId, setEditingRuleId] = useState<string>();
+  const [showPluginPanel, setShowPluginPanel] = useState(false);
 
   const visibleRules = useMemo(() => {
     return filterCustomRules(customRules?.rules ?? [], ruleOwnerFilter, ruleSearch);
@@ -90,6 +110,89 @@ function App() {
     setHistory(nextHistory);
   }
 
+  function clearPluginScopedData() {
+    setCustomRules(undefined);
+    setTargets([]);
+    setPlan(undefined);
+    setReport(undefined);
+    setDnsSnapshot(undefined);
+    setDnsPlan(undefined);
+    setDnsReport(undefined);
+    setShowRuleForm(false);
+    setEditingRuleId(undefined);
+    setDraft(initialDraft);
+    setModalMode("create");
+  }
+
+  async function refreshDnsProtection() {
+    if (!snapshot) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      setDnsSnapshot(await inspectDnsProtection(snapshot.profile.id));
+      setDnsPlan(undefined);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function prepareDnsProtection() {
+    if (!snapshot) return;
+    setBusy(true);
+    setError(undefined);
+    setDnsReport(undefined);
+    try {
+      setDnsPlan(await planDnsProtection(snapshot.profile.id));
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmDnsProtection() {
+    if (!snapshot || !dnsPlan) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const nextReport = await applyDnsProtection(dnsPlan.id);
+      setDnsReport(nextReport);
+      setDnsSnapshot(nextReport.snapshot);
+      setDnsPlan(undefined);
+      setHistory(await listHistory(snapshot.profile.id));
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restoreDnsProtection() {
+    if (!snapshot || !dnsReport?.backupId) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const nextReport = await rollbackDnsProtection(snapshot.profile.id, dnsReport.backupId);
+      setDnsReport(nextReport);
+      setDnsSnapshot(nextReport.snapshot);
+      setHistory(await listHistory(snapshot.profile.id));
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadForPluginState(profileId: string, pluginState: RouterPluginState) {
+    if (pluginState.selectedPlugin === "openClash" || pluginState.selectedPlugin === "nikki") {
+      await refreshRouterData(profileId);
+    } else {
+      setHistory(await listHistory(profileId));
+    }
+  }
+
   async function connect(trustHostKey = false) {
     setBusy(true);
     setError(undefined);
@@ -97,13 +200,9 @@ function App() {
       const nextSnapshot = await discoverRouter({ ...connection, trustHostKey });
       setSnapshot(nextSnapshot);
       if (nextSnapshot.needsHostKeyTrust && !trustHostKey) return;
-      if (nextSnapshot.selectedPlugin) {
-        await refreshRouterData(nextSnapshot.profile.id);
-      } else {
-        setCustomRules(undefined);
-        setTargets([]);
-        setHistory(await listHistory(nextSnapshot.profile.id));
-      }
+      clearPluginScopedData();
+      setShowPluginPanel(nextSnapshot.pluginState.plugins.length > 1 || nextSnapshot.pluginState.requiresManualSelection);
+      await loadForPluginState(nextSnapshot.profile.id, nextSnapshot.pluginState);
       setScreen("dashboard");
     } catch (cause) {
       setError(String(cause));
@@ -219,7 +318,7 @@ function App() {
         </header>
 
         <section className="connect-card">
-          <div className="eyebrow">ROUTE ASSISTANT · 0.2</div>
+          <div className="eyebrow">ROUTE ASSISTANT · 0.4</div>
           <h1>{t("connectTitle")}</h1>
           <p className="lead">只需提供 SSH 登录信息，软件会在不暴露控制端口的情况下识别代理插件。</p>
 
@@ -340,17 +439,36 @@ function App() {
     );
   }
 
-  const selectedPlugin = snapshot?.plugins.find((plugin) => plugin.kind === snapshot.selectedPlugin);
-  const runningPlugins = snapshot?.plugins.filter((plugin) => plugin.serviceState === "running" && plugin.kind !== "unsupported") ?? [];
+  const pluginState = snapshot?.pluginState;
+  const selectedPlugin = pluginState?.plugins.find((plugin) => plugin.kind === pluginState.selectedPlugin);
+  const writeBlocked = !pluginState?.canWrite;
 
   async function choosePlugin(kind: "openClash" | "nikki") {
     if (!snapshot) return;
     setBusy(true);
     setError(undefined);
     try {
-      await selectPlugin(snapshot.profile.id, kind);
-      setSnapshot({ ...snapshot, selectedPlugin: kind });
-      await refreshRouterData(snapshot.profile.id);
+      clearPluginScopedData();
+      const nextPluginState = await selectPlugin(snapshot.profile.id, kind);
+      setSnapshot({ ...snapshot, pluginState: nextPluginState });
+      await loadForPluginState(snapshot.profile.id, nextPluginState);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function redetectPlugins() {
+    if (!snapshot) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      clearPluginScopedData();
+      const nextPluginState = await refreshPluginState(snapshot.profile.id);
+      setSnapshot({ ...snapshot, pluginState: nextPluginState });
+      setShowPluginPanel(true);
+      await loadForPluginState(snapshot.profile.id, nextPluginState);
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -363,11 +481,11 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="brand-mark">路</div>
-          <div><strong>{t("appName")}</strong><span>v0.2.0</span></div>
+          <div><strong>{t("appName")}</strong><span>v0.4.0</span></div>
         </div>
         <nav>
-          {(["overview", "rules", "diagnostics", "history"] as Tab[]).map((item) => (
-            <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
+          {(["overview", "rules", "dnsProtection", "diagnostics", "history"] as Tab[]).map((item) => (
+            <button key={item} className={tab === item ? "active" : ""} onClick={() => { setTab(item); if (item === "dnsProtection" && !dnsSnapshot) void refreshDnsProtection(); }}>
               <span className="nav-dot" />{t(item)}
             </button>
           ))}
@@ -387,53 +505,77 @@ function App() {
           </div>
           <div className="header-actions">
             {selectedPlugin?.readOnly && <span className="pill warning">{t("readOnly")}</span>}
+            <button className="ghost" onClick={() => setShowPluginPanel((value) => !value)}>{t("switchPlugin")}</button>
             <button className="ghost" onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}>{locale === "zh-CN" ? "EN" : "中文"}</button>
           </div>
         </header>
 
         {error && <div className="alert error">{error}</div>}
 
-        {!snapshot?.selectedPlugin && runningPlugins.length > 1 && (
-          <div className="plugin-choice alert">
-            <strong>检测到多个代理插件同时运行</strong>
-            <span>一次只会修改一个插件，请选择本次要管理的对象。</span>
-            <div>
-              {runningPlugins.map((plugin) => (
-                <button
-                  key={plugin.kind}
-                  className="secondary"
-                  disabled={busy || plugin.kind === "unsupported"}
-                  onClick={() => choosePlugin(plugin.kind as "openClash" | "nikki")}
-                >
-                  {plugin.displayName}
-                </button>
-              ))}
-            </div>
+        {pluginState?.writeBlockReason && (
+          <div className="persistent-risk alert">
+            <strong>{(pluginState.runningPluginCount ?? 0) > 1 ? t("multiRunningTitle") : t("writeBlockedTitle")}</strong>
+            <span>{pluginState.writeBlockReason}</span>
           </div>
+        )}
+
+        {pluginState?.riskWarning && (
+          <div className="persistent-risk alert warning-only">
+            <strong>{t("multiRunningTitle")}</strong>
+            <span>{pluginState.riskWarning}</span>
+          </div>
+        )}
+
+        {showPluginPanel && pluginState && (
+          <section className="plugin-panel">
+            <div className="plugin-panel-heading">
+              <div><span className="card-label">{t("detectedPlugins")}</span><h2>{t("chooseManagedPlugin")}</h2></div>
+              <button className="secondary compact" disabled={busy} onClick={redetectPlugins}>{busy ? t("detecting") : t("redetect")}</button>
+            </div>
+            <div className="plugin-grid">
+              {pluginState.plugins.map((plugin) => {
+                const isSelected = plugin.kind === pluginState.selectedPlugin;
+                const canChoose = plugin.canSelect && (plugin.kind === "openClash" || plugin.kind === "nikki");
+                return (
+                  <article key={plugin.kind} className={`plugin-card ${isSelected ? "selected" : ""}`}>
+                    <div className="plugin-card-title"><span className={`status-dot ${plugin.serviceState}`} /><strong>{plugin.displayName}</strong>{isSelected && <span className="pill direct">{t("currentManaged")}</span>}</div>
+                    <code>{plugin.version ?? t("unknownVersion")}</code>
+                    <div className="plugin-tags">
+                      <span className={`pill ${plugin.serviceState === "running" ? "direct" : "warning"}`}>{plugin.serviceState === "running" ? t("running") : plugin.serviceState === "stopped" ? t("stopped") : t("unknown")}</span>
+                      <span className={`pill ${plugin.supportLevel === "managed" ? "direct" : "warning"}`}>{plugin.supportLevel === "managed" ? (plugin.readOnly ? t("viewOnly") : t("manageable")) : t("notSupportedYet")}</span>
+                    </div>
+                    <p>{plugin.reason ?? t("readyToManage")}</p>
+                    {canChoose ? <button className={isSelected ? "ghost" : "secondary"} disabled={busy || isSelected} onClick={() => choosePlugin(plugin.kind as "openClash" | "nikki")}>{isSelected ? t("selected") : t("manageThis")}</button> : <span className="unsupported-note">{t("detectedOnlyNote")}</span>}
+                  </article>
+                );
+              })}
+            </div>
+            {pluginState.writeBlockReason && <div className="write-block-note">⚠ {pluginState.writeBlockReason}</div>}
+          </section>
         )}
 
         {tab === "overview" && (
           <section className="dashboard-grid">
             <article className="status-card hero-card">
               <div>
-                <span className="card-label">当前代理工具</span>
+                <span className="card-label">{t("currentManagedObject")}</span>
                 <h2>{selectedPlugin?.displayName ?? "未识别"}</h2>
                 <p>{selectedPlugin?.coreVersion ?? selectedPlugin?.reason ?? t("pluginUnsupported")}</p>
               </div>
               <span className={`service-badge ${selectedPlugin?.serviceState}`}>
-                {selectedPlugin?.serviceState === "running" ? "运行正常" : "需要检查"}
+                {selectedPlugin?.serviceState === "running" ? t("runningNormally") : t("needsCheck")}
               </span>
             </article>
             <article className="metric-card"><span>插件版本</span><strong>{selectedPlugin?.version ?? "未知"}</strong></article>
             <article className="metric-card"><span>{t("customRuleTotal")}</span><strong>{customRules?.rules.length ?? 0}</strong><small>{t("assistantRules")} {customRules?.rules.filter((rule) => rule.owner === "assistant").length ?? 0} · {t("existingRules")} {customRules?.rules.filter((rule) => rule.owner === "existing").length ?? 0}</small></article>
-            <article className="metric-card"><span>安全能力</span><strong>{selectedPlugin?.capabilities.includes("rollback") ? "自动回滚" : "只读"}</strong><small>变更看门狗 120 秒</small></article>
+            <article className="metric-card"><span>安全能力</span><strong>{!writeBlocked && selectedPlugin?.capabilities.includes("rollback") ? "自动回滚" : "只读"}</strong><small>变更看门狗 120 秒</small></article>
             <article className="status-card full-card">
               <div className="section-heading"><div><span className="card-label">连接检查</span><h3>安全边界</h3></div></div>
               <ul className="check-list">
                 <li><span>✓</span> SSH 主机指纹已记录</li>
                 <li><span>✓</span> Mihomo 控制接口不暴露到局域网</li>
                 <li><span>✓</span> 只修改带助手标记的规则</li>
-                <li><span>✓</span> DNS、DHCP 和防火墙保持只读</li>
+                <li><span>✓</span> DNS 仅管理 OpenClash 官方覆写脚本中的助手标记块</li>
               </ul>
             </article>
           </section>
@@ -443,7 +585,7 @@ function App() {
           <section>
             <div className="section-heading">
               <div><p>{t("managedOnly")}</p></div>
-              <button className="primary" disabled={selectedPlugin?.readOnly} onClick={openCreate}>
+              <button className="primary" disabled={writeBlocked} title={pluginState?.writeBlockReason} onClick={openCreate}>
                 + {t("addRule")}
               </button>
             </div>
@@ -480,13 +622,122 @@ function App() {
                     <div className="rule-badges"><span className={`pill ${rule.enabled ? "direct" : "warning"}`}>{rule.enabled ? t("enabled") : t("disabled")}</span><span className="pill">{rule.owner === "assistant" ? t("assistantRules") : t("existingReadOnly")}</span><span className="pill policyGroup">{rule.target ?? "—"}</span></div>
                     <div className="rule-actions">
                       {rule.owner === "assistant" && rule.assistantRule ? <>
-                        <button className="secondary compact" disabled={busy} onClick={() => prepareEdit(rule)}>{t("editRule")}</button>
-                        <button className="delete-rule" disabled={busy} onClick={() => prepareDelete(rule.assistantRule!)}>{t("deleteRule")}</button>
-                      </> : <button className="secondary compact" disabled={busy || rule.owner !== "existing" || !rule.copyDraft} title={rule.owner === "existing" && rule.copyDraft ? t("copyAsAssistant") : t("copyUnsupported")} onClick={() => prepareCopy(rule)}>{t("copyAsAssistant")}</button>}
+                        <button className="secondary compact" disabled={busy || writeBlocked} title={pluginState?.writeBlockReason} onClick={() => prepareEdit(rule)}>{t("editRule")}</button>
+                        <button className="delete-rule" disabled={busy || writeBlocked} title={pluginState?.writeBlockReason} onClick={() => prepareDelete(rule.assistantRule!)}>{t("deleteRule")}</button>
+                      </> : <button className="secondary compact" disabled={busy || writeBlocked || rule.owner !== "existing" || !rule.copyDraft} title={writeBlocked ? pluginState?.writeBlockReason : rule.owner === "existing" && rule.copyDraft ? t("copyAsAssistant") : t("copyUnsupported")} onClick={() => prepareCopy(rule)}>{t("copyAsAssistant")}</button>}
                     </div>
                   </article>
                 ))}
               </div>
+            )}
+          </section>
+        )}
+
+        {tab === "dnsProtection" && (
+          <section className="dns-protection-page">
+            <article className="dns-protection-hero">
+              <div>
+                <span className="card-label">{t("dnsProtectionScope")}</span>
+                <h2>{t("dnsProtectionTitle")}</h2>
+                <p>{t("dnsProtectionIntro")}</p>
+              </div>
+              <button className="secondary" disabled={busy || !snapshot} onClick={refreshDnsProtection}>
+                {busy ? t("detecting") : t("recheckDns")}
+              </button>
+            </article>
+
+            <section className="dns-chain-section recommended">
+              <header><div><strong>{t("recommendedChain")}</strong><p>{t("recommendedChainHint")}</p></div></header>
+              <div className="dns-flow">
+                <span>{t("clientDevice")}</span><b>→</b><span>dnsmasq</span><b>→</b><span>OpenClash DNS</span><b>→</b><span>{t("encryptedDoh")}</span>
+              </div>
+            </section>
+
+            {!dnsSnapshot ? (
+              <div className="empty-state"><h3>{t("dnsChecking")}</h3><p>{t("dnsCheckingHint")}</p></div>
+            ) : (
+              <>
+                {(() => {
+                  const chain = dnsSnapshot.chain ?? { activeAdapters: [], clientNodes: [], routerNodes: [], observations: [], warnings: [] };
+                  const risks = dnsSnapshot.risks ?? [];
+                  const checks = dnsSnapshot.checks ?? [];
+                  return (
+                    <>
+                <section className="dns-chain-section">
+                  <header>
+                    <div><strong>{t("currentChain")}</strong><p>{t("activeAdapters")}：{chain.activeAdapters.length ? chain.activeAdapters.join("、") : t("unknown")}</p></div>
+                  </header>
+                  <div className="dns-chain-group">
+                    <h4>{t("currentClientChain")}</h4>
+                    <div className="dns-chain-nodes">
+                      {chain.clientNodes.length === 0 ? (
+                        <article className="dns-chain-node unknown"><strong>{t("chainUnknown")}</strong><small>{t("chainUnknown")}</small></article>
+                      ) : chain.clientNodes.map((node) => <article key={node.id} className={`dns-chain-node ${node.confidence}`} title={node.evidence}><strong>{node.label}</strong>{node.detail && <span>{node.detail}</span>}<small>{confidenceLabel(node.confidence)}</small></article>)}
+                    </div>
+                  </div>
+                  <div className="dns-chain-group">
+                    <h4>{t("currentRouterChain")}</h4>
+                    <div className="dns-chain-nodes">
+                      {chain.routerNodes.length === 0 ? (
+                        <article className="dns-chain-node unknown"><strong>{t("chainUnknown")}</strong><small>{t("chainUnknown")}</small></article>
+                      ) : chain.routerNodes.map((node) => <article key={node.id} className={`dns-chain-node ${node.confidence}`} title={node.evidence}><strong>{node.label}</strong>{node.detail && <span>{node.detail}</span>}<small>{confidenceLabel(node.confidence)}</small></article>)}
+                    </div>
+                  </div>
+                  {chain.warnings.length > 0 && <div className="dns-chain-warnings">{chain.warnings.map((warning) => <p key={warning}>⚠ {warning}</p>)}</div>}
+                </section>
+
+                <section className="dns-chain-section">
+                  <header><div><strong>{t("actualObservations")}</strong><p>{t("observationHint")}</p></div></header>
+                  <div className="dns-observations">
+                    {chain.observations.length === 0 ? (
+                      <article><span>{t("resolutionUnknown")}</span><strong>—</strong><b>{t("resolutionUnknown")}</b><small>{t("observationHint")}</small></article>
+                    ) : chain.observations.map((observation) => <article key={`${observation.source}-${observation.target}`}>
+                      <span>{observation.source}</span><strong>{observation.target}</strong>
+                      <b className={observation.success === true ? "success-text" : observation.success === false ? "danger-text" : ""}>{observation.success === true ? t("resolutionPassed") : observation.success === false ? t("resolutionFailed") : t("resolutionUnknown")}{observation.elapsedMs !== undefined ? ` · ${observation.elapsedMs} ms` : ""}</b>
+                      <small>{observation.detail}</small>
+                    </article>)}
+                  </div>
+                </section>
+
+                <div className={`dns-status-card ${dnsSnapshot.status}`}>
+                  <div>
+                    <span>{t("protectionStatus")}</span>
+                    <h3>{dnsSnapshot.status === "protected" ? t("dnsProtected") : dnsSnapshot.status === "needsAttention" ? t("dnsNeedsAttention") : t("dnsUnsupported")}</h3>
+                    <p>{dnsSnapshot.summary}</p>
+                  </div>
+                  <span className={`service-badge ${dnsSnapshot.status === "protected" ? "running" : "unknown"}`}>
+                    {dnsSnapshot.status === "protected" ? t("safe") : t("needsCheck")}
+                  </span>
+                </div>
+
+                <div className="dns-metrics">
+                  <article><span>{t("openclashDns")}</span><strong>{dnsSnapshot.dnsEnabled === true ? t("enabled") : dnsSnapshot.dnsEnabled === false ? t("disabled") : t("unknown")}</strong></article>
+                  <article><span>{t("encryptedUpstreams")}</span><strong>{dnsSnapshot.encryptedUpstreamCount ?? t("unknown")}</strong></article>
+                  <article><span>{t("plaintextUpstreams")}</span><strong className={(dnsSnapshot.plaintextUpstreamCount ?? 0) > 0 ? "danger-text" : ""}>{dnsSnapshot.plaintextUpstreamCount ?? t("unknown")}</strong></article>
+                  <article><span>{t("lanDnsEntry")}</span><strong>{dnsSnapshot.dnsmasqToOpenclash ? t("enteredOpenclash") : t("unconfirmed")}</strong></article>
+                </div>
+
+                {risks.length > 0 && <div className="dns-risk-list"><strong>{t("foundRisks")}</strong>{risks.map((risk) => <p key={risk}>⚠ {risk}</p>)}</div>}
+                <div className="dns-check-list">{checks.map((check) => <span key={check}>✓ {check}</span>)}</div>
+                    </>
+                  );
+                })()}
+
+                {dnsPlan && <div className="preview-box"><span>{t("preview")}</span><p>{dnsPlan.preview}</p><small>{t("dnsBackupHint")}</small></div>}
+                {dnsReport && <div className={`alert ${dnsReport.success ? "success" : "error"}`}>{dnsReport.messages.join(" ")}</div>}
+
+                <div className="dns-actions">
+                  {dnsReport?.backupId && !dnsReport.rolledBack && <button className="ghost" disabled={busy} onClick={restoreDnsProtection}>{t("restoreDnsBackup")}</button>}
+                  {!dnsPlan ? (
+                    <button className="primary" disabled={busy || !dnsSnapshot.canApply} title={!dnsSnapshot.canApply ? dnsSnapshot.summary : undefined} onClick={prepareDnsProtection}>
+                      {dnsSnapshot.status === "protected" ? t("alreadyProtected") : t("prepareDnsProtection")}
+                    </button>
+                  ) : (
+                    <button className="primary" disabled={busy || !dnsPlan.canApply} onClick={confirmDnsProtection}>{busy ? t("applyingDns") : t("confirmDnsProtection")}</button>
+                  )}
+                </div>
+                <p className="dns-boundary">{t("dnsBoundary")}</p>
+              </>
             )}
           </section>
         )}
@@ -517,14 +768,15 @@ function App() {
           <section className="modal">
             <header><div><span className="eyebrow">安全变更</span><h2>{modalMode === "delete" ? "删除助手规则" : modalMode === "edit" ? t("editRuleTitle") : modalMode === "copy" ? t("copyRuleTitle") : t("addRule")}</h2></div><button className="close" onClick={() => setShowRuleForm(false)}>×</button></header>
             {modalMode !== "delete" && <>
-              <label>{t("domain")}<input autoFocus placeholder="例如：www.baidu.com" value={draft.domain} onChange={(e) => { setDraft({ ...draft, domain: e.target.value }); setPlan(undefined); }} /></label>
-              <label>{t("scope")}<select value={draft.scope} onChange={(e) => { setDraft({ ...draft, scope: e.target.value as RuleDraft["scope"] }); setPlan(undefined); }}><option value="exact">{t("exactDomain")}</option><option value="suffix">{t("suffixDomain")}</option></select></label>
+              <label>{t("domain")}<input autoFocus placeholder="例如：baidu.com 或 www.baidu.com" value={draft.domain} onChange={(e) => { setDraft({ ...draft, domain: e.target.value }); setPlan(undefined); }} /></label>
+              <label>{t("scope")}<select value={draft.scope} onChange={(e) => { setDraft({ ...draft, scope: e.target.value as RuleDraft["scope"] }); setPlan(undefined); }}><option value="suffix">{t("suffixDomain")}</option><option value="exact">{t("exactDomain")}</option></select></label>
+              <p className="field-hint">{draft.scope === "exact" ? t("exactMatchHint") : t("suffixMatchHint")}</p>
               <label>{t("destination")}<select value={draft.action.type === "policyGroup" ? `group:${draft.action.name}` : draft.action.type} onChange={(e) => { const value = e.target.value; setDraft({ ...draft, action: value === "direct" ? { type: "direct" } : value === "reject" ? { type: "reject" } : { type: "policyGroup", name: value.slice(6) } }); setPlan(undefined); }}><option value="direct">{t("direct")}</option><option value="reject">{t("reject")}</option>{targets.filter((item) => item.kind === "group").map((target) => <option key={target.name} value={`group:${target.name}`}>{target.name}</option>)}</select></label>
               <label>{t("note")}<input value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} /></label>
             </>}
             {plan && <div className="preview-box"><span>{t("preview")}</span><p>{plan.preview}</p>{plan.conflicts.map((conflict) => <div key={conflict.message} className="conflict">⚠ {conflict.message}</div>)}<small>应用前创建备份；验证失败或连接中断时自动回滚。</small></div>}
             {report && <div className={`alert ${report.success ? "success" : "error"}`}>{report.messages.join(" ")}</div>}
-            <footer><button className="ghost" onClick={() => setShowRuleForm(false)}>{t("cancel")}</button>{!plan ? <button className="primary" disabled={busy || !draft.domain.trim()} onClick={createPlan}>{busy ? "处理中…" : t("preparePreview")}</button> : <button className={plan.operation === "delete" ? "danger" : "primary"} disabled={busy || !plan.canApply} onClick={applyPlan}>{busy ? "正在安全应用…" : plan.operation === "delete" ? "确认删除" : plan.conflicts.some((item) => item.requiresOverride) ? t("overrideApply") : t("confirmApply")}</button>}</footer>
+            <footer><button className="ghost" onClick={() => setShowRuleForm(false)}>{t("cancel")}</button>{!plan ? <button className="primary" disabled={busy || writeBlocked || !draft.domain.trim()} title={pluginState?.writeBlockReason} onClick={createPlan}>{busy ? "处理中…" : t("preparePreview")}</button> : <button className={plan.operation === "delete" ? "danger" : "primary"} disabled={busy || writeBlocked || !plan.canApply} title={pluginState?.writeBlockReason} onClick={applyPlan}>{busy ? "正在安全应用…" : plan.operation === "delete" ? "确认删除" : plan.conflicts.some((item) => item.requiresOverride) ? t("overrideApply") : t("confirmApply")}</button>}</footer>
           </section>
         </div>
       )}

@@ -1,5 +1,33 @@
 # 更新记录
 
+## 0.4.0
+
+- 多插件同时运行时只持续提示风险，不再因为 HomeProxy、PassWall/PassWall2 正在运行而阻止用户修改明确选中的 OpenClash/Nikki。
+- 新增 OpenClash 基础 DNS 防污染页面，区分当前已防护、可修复和仅诊断状态。
+- 只在 OpenClash 官方自定义覆写脚本中维护助手专属 DNS 标记块，预设国内外加密 DoH，并让国外 DNS 连接跟随现有分流规则。
+- DNS 检测只锁定 OpenClash 自己的运行配置，避免多插件环境误读其他 Mihomo 实例。
+- 保留当前 Fake-IP/Redir-Host 模式；应用前执行脚本和 Mihomo 配置检查，随后备份、原子替换、重启验证并由 120 秒看门狗兜底回滚。
+- 不自动改变局域网 DNS 入口，不修改 dnsmasq、DHCP、防火墙、SmartDNS、AdGuard Home、订阅或节点。
+- DNS 页面新增三层表达：推荐链路（示意）、当前 Windows/软路由配置链路、实际解析观测。
+- 通过 Windows API 读取当前电脑的活动网卡、IPv4/IPv6 DNS 和网关，并提示 VPN、隧道或外部 DNS 可能绕过软路由。
+- 路由器侧只读识别 dnsmasq、OpenClash DNS、AdGuard Home、SmartDNS、mosdns 的脱敏环回连接；每个节点标注确认、推断、未知或可能绕过。
+- 修正配置读取失败时加密/明文上游错误显示为 0 的问题；解析成功不再被表述为 DoH 已获证明。
+- OpenClash 转发到本机 AdGuard Home/SmartDNS 等服务时只读诊断，不把环回跳转误算成公网明文 DNS，也不允许基础方案覆盖组合链路。
+- 修复 ImmortalWrt 无 `base64` 导致远程写文件失败：改为 hex + Ruby 解码并校验大小。
+- 修复 Mihomo API `DomainSuffix`/`Domain` 与 YAML 类型名不一致导致的误回滚；应用后结合运行配置文件与 API 双重验证。
+- 自定义规则默认使用「整个域名及子域名」；精确匹配增加说明，避免只拦 `www` 误以为整站失效。
+- 拒绝规则同步写入 OpenClash 自定义 hosts（0.0.0.0）并开启 `custom_host`，避免「绕过大陆 IP + 国内域 Fake-IP 过滤」下 DOMAIN 拒绝不生效。
+- DNS 页增加 ErrorBoundary 与 chain 字段兜底，避免前后端版本不一致白屏。
+
+## 0.3.0
+
+- 将“当前代理工具”升级为“当前管理对象”，展示软路由中检测到的全部代理插件。
+- OpenClash、Nikki 可管理；HomeProxy、PassWall/PassWall2 仅检测，不读取或修改其配置。
+- 唯一运行的受支持插件自动选中；多个受支持插件同时运行时要求人工选择并持续提示风险。
+- 未支持插件运行时允许查看自定义规则，但后端阻止添加、编辑、删除、应用和回滚。
+- 每次写入前重新检测全部插件，并用状态指纹让过期预览自动失效。
+- 插件切换会清空旧规则、策略组、预览和验证结果，防止跨插件误操作。
+
 ## 0.2.0
 
 - 将“分流规则”升级为“自定义规则”，不读取或展开订阅规则。

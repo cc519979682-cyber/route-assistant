@@ -17,12 +17,20 @@ pub async fn discover_router(
 }
 
 #[tauri::command]
-pub fn select_plugin(
+pub async fn refresh_plugin_state(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<RouterPluginState> {
+    service::refresh_plugin_state(&state, &profile_id).await
+}
+
+#[tauri::command]
+pub async fn select_plugin(
     profile_id: String,
     plugin: PluginKind,
     state: State<'_, AppState>,
-) -> AppResult<()> {
-    state.select_plugin(&profile_id, plugin)
+) -> AppResult<RouterPluginState> {
+    service::select_plugin(&state, &profile_id, plugin).await
 }
 
 #[tauri::command]
@@ -46,7 +54,7 @@ pub async fn list_policy_targets(
     profile_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<PolicyTarget>> {
-    let (session, plugin) = service::with_session(&state, &profile_id).await?;
+    let (session, plugin, _) = service::with_session(&state, &profile_id).await?;
     let result = crate::adapters::policy_targets(&session, &plugin).await;
     session.disconnect().await;
     result
@@ -96,6 +104,39 @@ pub async fn verify_rule(
     state: State<'_, AppState>,
 ) -> AppResult<VerificationReport> {
     service::verify(&state, &profile_id, &rule_id).await
+}
+
+#[tauri::command]
+pub async fn inspect_dns_protection(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<DnsProtectionSnapshot> {
+    service::inspect_dns_protection(&state, &profile_id).await
+}
+
+#[tauri::command]
+pub async fn plan_dns_protection(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<DnsProtectionPlan> {
+    service::plan_dns_protection(&state, &profile_id).await
+}
+
+#[tauri::command]
+pub async fn apply_dns_protection(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<DnsProtectionReport> {
+    service::apply_dns_protection(&state, &plan_id).await
+}
+
+#[tauri::command]
+pub async fn rollback_dns_protection(
+    profile_id: String,
+    backup_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<DnsProtectionReport> {
+    service::rollback_dns_protection(&state, &profile_id, &backup_id).await
 }
 
 #[tauri::command]

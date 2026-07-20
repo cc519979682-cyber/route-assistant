@@ -42,7 +42,30 @@ pub struct RouterProfile {
 pub enum PluginKind {
     OpenClash,
     Nikki,
+    HomeProxy,
+    PassWall,
     Unsupported,
+}
+
+impl PluginKind {
+    pub fn is_managed(&self) -> bool {
+        matches!(self, Self::OpenClash | Self::Nikki)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginSupportLevel {
+    Managed,
+    DetectedOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginSelectionReason {
+    AutoRunning,
+    AutoOnlyManaged,
+    Manual,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,8 +85,25 @@ pub struct DetectedPlugin {
     pub service_state: ServiceState,
     pub core_version: Option<String>,
     pub capabilities: Vec<String>,
+    pub support_level: PluginSupportLevel,
+    pub can_select: bool,
+    pub can_read_custom_rules: bool,
     pub read_only: bool,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterPluginState {
+    pub plugins: Vec<DetectedPlugin>,
+    pub selected_plugin: Option<PluginKind>,
+    pub selection_reason: Option<PluginSelectionReason>,
+    pub requires_manual_selection: bool,
+    pub running_plugin_count: usize,
+    pub can_write: bool,
+    pub write_block_reason: Option<String>,
+    pub risk_warning: Option<String>,
+    pub state_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,8 +112,7 @@ pub struct RouterSnapshot {
     pub profile: RouterProfile,
     pub distribution: String,
     pub release: Option<String>,
-    pub plugins: Vec<DetectedPlugin>,
-    pub selected_plugin: Option<PluginKind>,
+    pub plugin_state: RouterPluginState,
     pub host_key_fingerprint: String,
     pub needs_host_key_trust: bool,
 }
@@ -208,6 +247,8 @@ pub struct ChangePlan {
     pub id: String,
     pub profile_id: String,
     pub plugin: PluginKind,
+    #[serde(default)]
+    pub plugin_state_token: String,
     pub operation: String,
     pub rule: RuleSpec,
     pub preview: String,
@@ -224,6 +265,99 @@ pub struct DnsObservation {
     pub addresses: Vec<String>,
     pub elapsed_ms: Option<u64>,
     pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DnsProtectionStatus {
+    Protected,
+    NeedsAttention,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DnsChainConfidence {
+    Confirmed,
+    Inferred,
+    Unknown,
+    PossibleBypass,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsChainNode {
+    pub id: String,
+    pub label: String,
+    pub detail: Option<String>,
+    pub confidence: DnsChainConfidence,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsResolutionObservation {
+    pub source: String,
+    pub target: String,
+    pub success: Option<bool>,
+    pub elapsed_ms: Option<u64>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsChainSnapshot {
+    pub active_adapters: Vec<String>,
+    pub client_nodes: Vec<DnsChainNode>,
+    pub router_nodes: Vec<DnsChainNode>,
+    pub observations: Vec<DnsResolutionObservation>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsProtectionSnapshot {
+    pub plugin: PluginKind,
+    pub status: DnsProtectionStatus,
+    pub summary: String,
+    pub supported: bool,
+    pub can_apply: bool,
+    pub dns_enabled: Option<bool>,
+    pub enhanced_mode: Option<String>,
+    pub dnsmasq_to_openclash: Option<bool>,
+    pub encrypted_upstream_count: Option<usize>,
+    pub plaintext_upstream_count: Option<usize>,
+    pub local_upstreams: Vec<String>,
+    pub respect_rules: Option<bool>,
+    pub managed_by_assistant: bool,
+    pub risks: Vec<String>,
+    pub checks: Vec<String>,
+    pub chain: DnsChainSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsProtectionPlan {
+    pub id: String,
+    pub profile_id: String,
+    pub plugin: PluginKind,
+    pub plugin_state_token: String,
+    pub preview: String,
+    pub can_apply: bool,
+    pub requires_reload: bool,
+    pub interruption_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsProtectionReport {
+    pub change_id: String,
+    pub success: bool,
+    pub rolled_back: bool,
+    pub backup_id: Option<String>,
+    pub messages: Vec<String>,
+    pub snapshot: DnsProtectionSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,3 +12,12 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+# local build caches / packaging
+*.zip
+Thumbs.db
+Desktop.ini
+.DS_Store
+# personal / commercial packaging leftovers if any outside release/
+闲鱼*
+*发货包*
+RouteAssistantDev/
